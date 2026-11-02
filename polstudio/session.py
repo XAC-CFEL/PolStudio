@@ -93,9 +93,13 @@ def runStepChain(data, steps, peakConfig=None, pulseEnergy=None, log=print):
                 continue
             pf.filterByIntensity(pulseEnergy, **params)
         elif name == "stack":
+            # A preview of a few trains may hold fewer trains/pulses than the stack sizes
             nTrains = len(np.unique(pf.data["trainId"].values))
+            nPulses = len(np.unique(pf.data["pulseId"].values))
             if params.get("trainStackSize") and params["trainStackSize"] > nTrains:
                 params["trainStackSize"] = nTrains
+            if params.get("pulseStackSize") and params["pulseStackSize"] > nPulses:
+                params["pulseStackSize"] = nPulses
             pf.stack(**params)
         elif name == "tShift":
             pf.tShift(params.get("shift") or 0)

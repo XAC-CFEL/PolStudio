@@ -17,8 +17,11 @@ STEP_HELP = {
     "subtractPeriodicNoise": "Tile the noiseRegion [start, stop) over the trace and subtract it.",
     "fftNoiseSubtraction": "Zero FFT components between minFreq and maxFreq (cycles/sample).",
     "tShift": "Additional shift of all detectors (int) or per detector ({det: n}).",
-    "stack": "Average blocks of trainStackSize trains per pulseId (empty = all trains). "
-             "stackPulses averages over trains for every pulseStackSize-th pulseId.",
+    "stack": "stackTrains: average blocks of trainStackSize consecutive trains per pulseId "
+             "(empty = all trains); labelled with the block's first trainId. "
+             "stackPulses: within each train, average groups of pulseStackSize consecutive pulseIds "
+             "(empty = all pulses) between pulseStackStart and pulseStackStop; labelled with the group's "
+             "first pulseId. Incomplete blocks/groups at the end are dropped.",
     "smooth": "Centred rolling mean of windowSize samples.",
     "normalize": "Divide by the global maximum, or by the maximum of detector ToF.",
 }
@@ -69,7 +72,7 @@ class PreprocessTab(QWidget):
         self.pulseCombo = QComboBox()
         self.pulseCombo.currentIndexChanged.connect(self.redraw)
         previewLayout.addRow("show pulse", self.pulseCombo)
-        self.showRaw = QCheckBox("overlay raw (first train, rescaled)")
+        self.showRaw = QCheckBox("overlay raw pulse (same trainId / pulseId, rescaled)")
         self.showRaw.setChecked(True)
         self.showRaw.toggled.connect(self.redraw)
         previewLayout.addRow(self.showRaw)
@@ -83,6 +86,7 @@ class PreprocessTab(QWidget):
         previewLayout.addRow(buttons)
         self.statusLabel = QLabel("")
         self.statusLabel.setWordWrap(True)
+        self.statusLabel.setTextFormat(Qt.TextFormat.RichText)
         previewLayout.addRow(self.statusLabel)
         sideLayout.addWidget(preview)
         splitter.addWidget(side)
@@ -170,7 +174,10 @@ class PreprocessTab(QWidget):
         idx = self.pulseCombo.findData(current)
         self.pulseCombo.setCurrentIndex(idx if idx >= 0 else 0)
         self.pulseCombo.blockSignals(False)
-        self.statusLabel.setText(f"raw {dict(raw.sizes)} → processed {dict(processed.sizes)}")
+        text = f"raw {dict(raw.sizes)} → processed {dict(processed.sizes)}"
+        if processed.sizes["pulse"] and raw.sizes["pulse"] > processed.sizes["pulse"]:
+            text += f"<br>each processed trace averages ≈ {raw.sizes['pulse'] / processed.sizes['pulse']:.3g} raw pulses"
+        self.statusLabel.setText(text)
         self.redraw()
 
     def redraw(self):
@@ -185,8 +192,13 @@ class PreprocessTab(QWidget):
         for det, plot in self.grid.plots.items():
             y = processed.sel(detector=det).isel(pulse=i).values
             if self.showRaw.isChecked():
+                # The stacked trace carries the first trainId / pulseId of its block: show that raw pulse
                 rawIdx = raw["pulse"].to_index()
-                matches = np.nonzero(rawIdx.get_level_values("pulseId") == pid)[0]
+                rawTids = rawIdx.get_level_values("trainId")
+                rawPids = rawIdx.get_level_values("pulseId")
+                matches = np.nonzero((rawTids == tid) & (rawPids == pid))[0]
+                if not len(matches):
+                    matches = np.nonzero(rawPids == pid)[0]
                 if len(matches):
                     r = raw.sel(detector=det).isel(pulse=matches[0]).values
                     scale = np.nanmax(np.abs(y)) / np.nanmax(np.abs(r)) if np.nanmax(np.abs(r)) > 0 else 1
