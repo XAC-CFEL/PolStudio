@@ -43,27 +43,6 @@ def nearestGrid(traces, anglesRad, nTheta=N_THETA):
     return traces[np.argmin(diff, axis=1)]
 
 
-def angularCells(anglesRad):
-    """
-    Angular cell of every detector when drawn without interpolation: from halfway to the previous detector to
-    halfway to the next one (the cells tile the circle). With irregular spacing the detector angle is not the
-    cell centre. Returns (start, end, centre) in radians, per detector in input order.
-    """
-    anglesRad = np.asarray(anglesRad, float)
-    if len(anglesRad) < 2:
-        start = anglesRad - np.pi
-        return start, start + 2 * np.pi, anglesRad.copy()
-    order = np.argsort(anglesRad)
-    sortedAngles = anglesRad[order]
-    gaps = np.diff(sortedAngles, append=sortedAngles[0] + 2 * np.pi)
-    halfLeft = np.empty_like(gaps)
-    halfRight = np.empty_like(gaps)
-    halfLeft[order] = np.roll(gaps, 1) / 2
-    halfRight[order] = gaps / 2
-    start, end = anglesRad - halfLeft, anglesRad + halfRight
-    return start, end, (start + end) / 2
-
-
 def _levels(values):
     finite = values[np.isfinite(values)]
     if not finite.size:
@@ -200,11 +179,17 @@ class PolarHeatmap(_HeatmapBase):
             self._levelItems.append(self.image)
         else:
             self.image.setVisible(False)
-            cellStart, cellEnd, _ = angularCells(anglesRad)
+            order = np.argsort(anglesRad)
+            sortedAngles = anglesRad[order]
+            gaps = np.diff(sortedAngles, append=sortedAngles[0] + 2 * np.pi) if len(order) > 1 else np.array([2 * np.pi])
+            halfLeft = np.empty_like(gaps)
+            halfRight = np.empty_like(gaps)
+            halfLeft[order] = np.roll(gaps, 1) / 2
+            halfRight[order] = gaps / 2
             dr = float(samples[1] - samples[0]) if len(samples) > 1 else 1.0
             rEdges = np.clip(rmap(np.concatenate([[samples[0] - dr / 2], samples + dr / 2])), 0, None)
             for k, angle in enumerate(anglesRad):
-                th, rr = np.meshgrid([cellStart[k], cellEnd[k]], rEdges, indexing="ij")
+                th, rr = np.meshgrid([angle - halfLeft[k], angle + halfRight[k]], rEdges, indexing="ij")
                 wedge = pg.PColorMeshItem(rr * np.cos(th), rr * np.sin(th), traces[k][None, :],
                                           colorMap=cmap, levels=levels)
                 self.plot.addItem(wedge)
@@ -227,12 +212,10 @@ class PolarHeatmap(_HeatmapBase):
         self.plot.setYRange(-half, half, padding=0)
 
         xs, ys, segX, segY = [], [], [], []
-        # Without interpolation a detector fills its whole wedge: put its peaks on the wedge centre line
-        peakAngles = anglesRad if interpolate else angularCells(anglesRad)[2]
         for row, pos, wl, wr in peaks:
             if not (sMin <= pos <= sMax):
                 continue
-            c, s_ = np.cos(peakAngles[row]), np.sin(peakAngles[row])
+            c, s_ = np.cos(anglesRad[row]), np.sin(anglesRad[row])
             p, a, b = (float(np.clip(rmap(v), 0, rMax)) for v in (pos, pos + wl, pos + wr))
             xs.append(p * c)
             ys.append(p * s_)
@@ -264,8 +247,7 @@ class CartesianHeatmap(_HeatmapBase):
             self.plot.setLabel("left", "angle (°)")
             axis.setTicks(None)
             self.plot.setYRange(0, 360, padding=0.02)
-            # nearest-detector bands are the same cells as the polar wedges: peaks go to the band centre
-            rowY = np.degrees(anglesRad if interpolate else angularCells(anglesRad)[2] % (2 * np.pi))
+            rowY = np.degrees(anglesRad)
         else:
             order = np.argsort(detIds)
             grid = traces[order]
