@@ -131,7 +131,7 @@ class AnalysisSession:
         if state:
             state = copy.deepcopy(state)
             # Keep defaults for parameters added after the session was saved
-            for key in ("peaks", "calibration", "polarization"):
+            for key in ("peaks", "calibration", "polarization", "resultsTable"):
                 if isinstance(state.get(key), dict):
                     state[key] = {**self.state[key], **state[key]}
             self.state.update(state)
@@ -154,6 +154,7 @@ class AnalysisSession:
                             "file": None},
             "polarization": copy.deepcopy(DEFAULT_POL_PARAMS),
             "workers": 0,                # worker processes per detector; 0 = auto, 1 = no pool
+            "resultsTable": {"file": None, "auto": False},   # polarization results table (results_table.py)
         }
 
     def reset(self):
@@ -176,6 +177,7 @@ class AnalysisSession:
         self.processedVersion = 0       # bumped whenever all processed traces are recomputed
         self.resultsDetectors = set()   # detectors the peak finder ran on (a detector may have no peaks)
         self.polarizationInputs = None
+        self.lastTableInputs = None     # polarizationInputs of the fit last appended to the results table
 
     def close(self):
         """Release files and worker processes."""

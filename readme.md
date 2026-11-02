@@ -48,6 +48,25 @@ Polarization = peak results and the polarization fit. Only what changed is recom
 
 Calibrations are never recomputed by *Update*. *Load selection* still starts from scratch.
 
+## Polarization results table
+
+On the **Polarization** tab, *Results table → Choose file…* picks a CSV table (new or existing, default
+`results/polarization_results.csv`). *Append current fit* adds the current fit as a row; with
+**append every fit** ticked every fit is added, so the loop is: select another run, *Update → Polarization*.
+A fit that is already in the table (same inputs) is not added twice by the automatic append.
+
+Each row holds the run(s), files, train range, detectors, photon energy, the fit settings, P_lin, φ, scale and
+β₂ with errors, the git commits and references to the settings it was made with:
+
+```
+polarization_results.csv
+configs/config_<hash>.yaml            every setting except the run selection (loadable as config)
+calibrations/calibration_<hash>.json  calibration in use (energy / transmission)
+```
+
+These files are named after a hash of their content and written only when it changes, so all rows analysed
+with the same settings and calibration point to the same two files.
+
 ## Parallel processing
 
 *Apply to all* and *Find peaks* run one detector per worker process (setting *worker processes* in the

@@ -1,14 +1,20 @@
 """Polarization fit (Fitter.pol) and polar intensity map (Plotter) on embedded matplotlib canvases."""
+from pathlib import Path
+
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox, QSplitter, QVBoxLayout,
-                             QWidget, QFormLayout)
+from PyQt6.QtWidgets import (QCheckBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox, QSplitter,
+                             QVBoxLayout, QWidget, QFormLayout)
 
 from ToFPipeline import Plotter
 
+from .pandas_model import PandasModel, makeTableView
 from .params import ParamForm
+
+TABLE_VIEW_COLUMNS = ["timestamp", "runs", "Plin", "Plin error", "phi", "phi error", "photon energy", "nDetectors",
+                      "useTransmission", "config", "calibration"]
 
 POL_TOOLTIPS = {
     "peakNo": "Peak used for the fit",
@@ -24,6 +30,8 @@ POL_TOOLTIPS = {
 
 class PolarizationTab(QWidget):
     fitRequested = pyqtSignal(dict)
+    chooseTableRequested = pyqtSignal()
+    appendRequested = pyqtSignal()
 
     def __init__(self, session, parent=None):
         super().__init__(parent)
@@ -55,9 +63,31 @@ class PolarizationTab(QWidget):
         drawButton.clicked.connect(self.drawHeatmap)
         heatLayout.addRow(drawButton)
         sideLayout.addWidget(heat)
+
+        table = QGroupBox("Results table")
+        tableLayout = QVBoxLayout(table)
+        self.tableLabel = QLabel("")
+        self.tableLabel.setWordWrap(True)
+        tableLayout.addWidget(self.tableLabel)
+        row = QHBoxLayout()
+        chooseButton = QPushButton("Choose file…")
+        chooseButton.clicked.connect(self.chooseTableRequested)
+        self.appendButton = QPushButton("Append current fit")
+        self.appendButton.clicked.connect(self.appendRequested)
+        row.addWidget(chooseButton)
+        row.addWidget(self.appendButton)
+        tableLayout.addLayout(row)
+        self.autoCheck = QCheckBox("append every fit")
+        self.autoCheck.setToolTip("Append a row after every polarization fit, e.g. after selecting another run and "
+                                  "pressing 'Update → Polarization'. Config and calibration are stored once and "
+                                  "referenced from the rows.")
+        self.autoCheck.toggled.connect(lambda on: self.session.state["resultsTable"].__setitem__("auto", on))
+        tableLayout.addWidget(self.autoCheck)
+        sideLayout.addWidget(table)
         sideLayout.addStretch(1)
         splitter.addWidget(side)
 
+        right = QSplitter(Qt.Orientation.Vertical)
         plots = QWidget()
         plotsLayout = QVBoxLayout(plots)
         self.figure = Figure(figsize=(10, 5), layout="constrained")
@@ -66,9 +96,14 @@ class PolarizationTab(QWidget):
         plotsLayout.addWidget(self.canvas, stretch=1)
         self.polAx = self.figure.add_subplot(1, 2, 1, projection="polar")
         self.heatAx = self.figure.add_subplot(1, 2, 2, projection="polar")
-        splitter.addWidget(plots)
+        right.addWidget(plots)
+        self.tableModel = PandasModel()
+        right.addWidget(makeTableView(self.tableModel))
+        right.setSizes([650, 200])
+        splitter.addWidget(right)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([320, 1000])
+        self.reloadTableSettings()
 
     def params(self):
         params = self.form.params()
@@ -77,6 +112,29 @@ class PolarizationTab(QWidget):
 
     def reloadSettings(self):
         self.form.setParams(dict(self.session.state["polarization"]))
+        self.reloadTableSettings()
+
+    def reloadTableSettings(self):
+        settings = self.session.state["resultsTable"]
+        self.autoCheck.blockSignals(True)
+        self.autoCheck.setChecked(bool(settings.get("auto")))
+        self.autoCheck.blockSignals(False)
+        self.showTable()
+
+    def showTable(self, message=None):
+        """Show the table file and its rows (newest first)."""
+        from ..results_table import ResultsTable
+        path = self.session.state["resultsTable"].get("file")
+        if not path:
+            self.tableLabel.setText("No table file chosen")
+            self.tableModel.setDataFrame(None)
+            return
+        table = ResultsTable(path).read()
+        columns = [c for c in TABLE_VIEW_COLUMNS if c in table.columns]
+        self.tableModel.setDataFrame(table[columns].iloc[::-1].reset_index(drop=True))
+        text = f"{Path(path).name}: {len(table)} rows"
+        self.tableLabel.setText(text + (f"\n{message}" if message else ""))
+        self.tableLabel.setToolTip(str(path))
 
     def onProcessedChanged(self):
         data = self.session.processed

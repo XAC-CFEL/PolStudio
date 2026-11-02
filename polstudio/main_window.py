@@ -113,6 +113,8 @@ class MainWindow(QMainWindow):
         self.calibrationTab.saveRequested.connect(self.saveCalibrationDialog)
         self.calibrationTab.photonEnergiesChanged.connect(self.onResultsChanged)
         self.polarizationTab.fitRequested.connect(self.fitPolarization)
+        self.polarizationTab.chooseTableRequested.connect(self.chooseResultsTable)
+        self.polarizationTab.appendRequested.connect(lambda: self.appendToResultsTable(auto=False))
 
     # ------------------------------------------------------------------ helpers
     def appendLog(self, text):
@@ -328,6 +330,44 @@ class MainWindow(QMainWindow):
             return self.error(f"Polarization fit failed: {type(e).__name__}: {e}")
         print(f"Polarization: {result['params']} ± {result['errors']}")
         self.polarizationTab.showFit(result)
+        if self.session.state["resultsTable"].get("auto"):
+            self.appendToResultsTable(auto=True)
+
+    def chooseResultsTable(self):
+        current = self.session.state["resultsTable"].get("file") or str(RESULTS_DIR / "polarization_results.csv")
+        Path(current).parent.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(self, "Polarization results table (new or existing)", current,
+                                              "CSV table (*.csv)", options=QFileDialog.Option.DontConfirmOverwrite)
+        if path:
+            self.session.state["resultsTable"]["file"] = path
+            self.session.lastTableInputs = None
+            self.polarizationTab.showTable()
+            print(f"Results table: {path}")
+
+    def appendToResultsTable(self, auto=False):
+        """Append the current fit; auto=True skips a fit that is already in the table."""
+        from .results_table import ResultsTable
+        s = self.session
+        if s.polarization is None:
+            return None if auto else self.error("No polarization fit to append – fit first")
+        if not s.state["resultsTable"].get("file"):
+            if auto:
+                print("Results table: no file chosen, fit not appended")
+                return None
+            self.chooseResultsTable()
+            if not s.state["resultsTable"].get("file"):
+                return None
+        if auto and s.lastTableInputs == s.polarizationInputs:
+            return None
+        try:
+            row = ResultsTable(s.state["resultsTable"]["file"]).append(s)
+        except Exception as e:
+            return self.error(f"Could not append to the results table: {type(e).__name__}: {e}")
+        s.lastTableInputs = s.polarizationInputs
+        message = f"appended run {row['runs']}: P_lin = {row['Plin']:.3f}, φ = {row['phi']:.1f}°"
+        print(f"Results table: {message}")
+        self.polarizationTab.showTable(message)
+        return row
 
     # ------------------------------------------------------------------ sessions / config
     def _views(self):
