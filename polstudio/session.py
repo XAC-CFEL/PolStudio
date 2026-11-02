@@ -622,8 +622,11 @@ class AnalysisSession:
         transParam = self.transmissionCalib if (useTransmission and self.transmissionCalib is not None
                                                 and len(self.transmissionCalib)) else None
         fitter = Fitter(self.results, config=self.config.get("Fitter"), Ebind=params.pop("Ebind", 0.0))
+        # Same orientation as every other polar plot here (0° on the right, counter-clockwise);
+        # Fitter.pol defaults to 0° at the top
+        plotArgs = {"orientation": "E", "direction": 1}
         fitParams, errors = fitter.pol(transParam=transParam, plot=ax is not None, ax=ax, savename=False,
-                                       show=False, **params)
+                                       show=False, **{**plotArgs, **params})
         names = ["Plin", "phi", "scale"] + (["beta2"] if params.get("fitBeta") else [])
         self.polarizationInputs = self._polarizationSignature()
         self.polarization = {
