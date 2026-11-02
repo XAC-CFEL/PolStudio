@@ -13,6 +13,7 @@ from .widgets.calibration_tab import CalibrationTab
 from .widgets.data_panel import DataPanel
 from .widgets.inspect_tab import InspectTab
 from .widgets.peaks_tab import PeaksTab
+from .widgets.heatmap_tab import HeatmapTab
 from .widgets.polarization_tab import PolarizationTab
 from .widgets.preprocess_tab import PreprocessTab
 from .workers import Task
@@ -48,10 +49,11 @@ class MainWindow(QMainWindow):
         self.preprocessTab = PreprocessTab(session)
         self.peaksTab = PeaksTab(session)
         self.calibrationTab = CalibrationTab(session)
+        self.heatmapTab = HeatmapTab(session)
         self.polarizationTab = PolarizationTab(session)
         for tab, name in ((self.inspectTab, "Inspect"), (self.preprocessTab, "Preprocess"),
-                          (self.peaksTab, "Peaks"), (self.calibrationTab, "Calibration"),
-                          (self.polarizationTab, "Polarization")):
+                          (self.peaksTab, "Peaks"), (self.heatmapTab, "Heatmap"),
+                          (self.calibrationTab, "Calibration"), (self.polarizationTab, "Polarization")):
             self.tabs.addTab(tab, name)
         self.setCentralWidget(self.tabs)
         self.resizeDocks([self.dataDock], [430], Qt.Orientation.Horizontal)
@@ -209,6 +211,7 @@ class MainWindow(QMainWindow):
         if p is not None:
             self.preprocessTab.setProcessedInfo(f"Processed data: {dict(p.sizes)}")
         self.peaksTab.onProcessedChanged()
+        self.heatmapTab.onProcessedChanged()
         self.polarizationTab.onProcessedChanged()
 
     def findPeaks(self, params):
@@ -219,6 +222,7 @@ class MainWindow(QMainWindow):
     def onResultsChanged(self):
         self.peaksTab.onResultsChanged()
         self.calibrationTab.onResultsChanged()
+        self.heatmapTab.redraw()
 
     # ------------------------------------------------------------------ calibration / polarization
     def computeEnergy(self):
@@ -281,7 +285,8 @@ class MainWindow(QMainWindow):
         return {"inspect": self.inspectTab.view, "preprocess": self.preprocessTab.grid.view,
                 "peaks": self.peaksTab.grid.view, "peak_histogram": self.peaksTab.histPlot,
                 "energy_calibration": self.calibrationTab.energyPlot,
-                "transmission": self.calibrationTab.transPlot}
+                "transmission": self.calibrationTab.transPlot,
+                "heatmap": self.heatmapTab.currentView()}
 
     def _save(self, folder):
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
@@ -338,8 +343,8 @@ class MainWindow(QMainWindow):
         if self.session is not None and self.session is not session:
             self.session.close()
         self.session = session
-        for widget in (self.dataPanel, self.inspectTab, self.preprocessTab, self.peaksTab, self.calibrationTab,
-                       self.polarizationTab):
+        for widget in (self.dataPanel, self.inspectTab, self.preprocessTab, self.peaksTab, self.heatmapTab,
+                       self.calibrationTab, self.polarizationTab):
             widget.session = session
         self.inspectTab.loadSplitSettings(session.loaderConfig)
         self.inspectTab._updateStartsLabel()
