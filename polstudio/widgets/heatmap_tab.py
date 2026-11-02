@@ -6,7 +6,7 @@ AngularHeatmapCanvas / CartesianHeightCanvas:
   between detectors over the full circle, or one wedge per detector.
 - Cartesian: sample (x) vs detector number or detector angle (y), optionally interpolated between rows.
 
-Options as in PolScope: sample range, interpolate, show peaks (marker + width bar), raster resolution;
+Options as in PolScope: sample range, interpolate, show peaks (marker + width bar);
 plus colormap, a colour bar with draggable levels and the choice of pulse.
 """
 import numpy as np
@@ -20,6 +20,7 @@ from .plot_grid import TOL
 COLORMAPS = ["viridis", "inferno", "plasma", "magma", "cividis", "turbo"]
 PEAK_COLOR = "#EE6677"     # Tol red: readable on all colormaps above
 N_THETA = 720
+RASTER_SIZE = 1024   # polar raster in pixels; the plot is redrawn on demand only, so render it at full quality
 
 
 def angularGrid(traces, anglesRad, nTheta=N_THETA):
@@ -147,12 +148,7 @@ class PolarHeatmap(_HeatmapBase):
                             valid)
         return self._rasterMaps
 
-    def _rasterSize(self, resolution):
-        if resolution > 0:
-            return int(np.clip(resolution, 256, 1024))
-        return int(np.clip(min(self.plot.width(), self.plot.height()), 256, 640))
-
-    def update(self, traces, samples, anglesDeg, peaks, interpolate, resolution, cmap, levels):
+    def update(self, traces, samples, anglesDeg, peaks, interpolate, cmap, levels):
         """traces (n_det, n_samples); anglesDeg per row; peaks: list of (row, pos, widthL, widthR)."""
         for item in self._wedges:
             self.plot.removeItem(item)
@@ -170,7 +166,7 @@ class PolarHeatmap(_HeatmapBase):
             nTheta, nR = grid.shape
             if nR < 2:
                 grid, nR = np.hstack([grid, grid]), 2
-            size = self._rasterSize(resolution)
+            size = RASTER_SIZE
             ia, ib, ic, id_, w00, w10, w01, w11, valid = self._rasterTables(nTheta, nR, size, rMax)
             g = np.ascontiguousarray(grid, dtype=np.float32).ravel()
             img = np.full(size * size, np.nan, dtype=np.float32)
@@ -328,10 +324,6 @@ class HeatmapTab(QWidget):
         self.peaksCheck.setChecked(True)
         self.peaksCheck.setToolTip("Peak position and width from the Peaks tab (single pulse only)")
         form.addRow(self.peaksCheck)
-        self.resolutionSpin = QSpinBox(maximum=1024, singleStep=64)
-        self.resolutionSpin.setSpecialValueText("auto")
-        self.resolutionSpin.setToolTip("Polar raster size in pixels (auto = match plot size)")
-        form.addRow("resolution", self.resolutionSpin)
         self.cmapCombo = QComboBox()
         self.cmapCombo.addItems(COLORMAPS)
         form.addRow("colormap", self.cmapCombo)
@@ -350,7 +342,7 @@ class HeatmapTab(QWidget):
         sideWidget.setMaximumWidth(280)
         layout.addWidget(sideWidget)
 
-        for spin in (self.pulseSpin, self.sMinSpin, self.sMaxSpin, self.resolutionSpin):
+        for spin in (self.pulseSpin, self.sMinSpin, self.sMaxSpin):
             spin.valueChanged.connect(self.redraw)
         for check in (self.averageCheck, self.cartesianCheck, self.angleAxisCheck, self.interpolateCheck,
                       self.peaksCheck, self.autoLevelsCheck):
@@ -394,7 +386,6 @@ class HeatmapTab(QWidget):
         data = self.session.processed
         self.stack.setCurrentWidget(self.cartesian if self.cartesianCheck.isChecked() else self.polar)
         self.angleAxisCheck.setEnabled(self.cartesianCheck.isChecked())
-        self.resolutionSpin.setEnabled(not self.cartesianCheck.isChecked())
         if data is None or data.sizes["pulse"] == 0:
             self.infoLabel.setText("Apply the preprocessing to see a heatmap")
             return
@@ -433,7 +424,7 @@ class HeatmapTab(QWidget):
             remap = {int(r): k for k, r in enumerate(rows)}
             self.polar.update(traces[rows], samples, angles[rows],
                               [(remap[r], p, a, b) for r, p, a, b in peaks if r in remap],
-                              self.interpolateCheck.isChecked(), self.resolutionSpin.value(), cmap, levels)
+                              self.interpolateCheck.isChecked(), cmap, levels)
         missing = [d for d, ok in zip(detectors, keep) if not ok]
         self.infoLabel.setText(f"{len(detectors)} detectors, samples {lo}–{hi}"
                                + (f"<br>no angle for ToF {missing}: not shown" if missing else ""))
