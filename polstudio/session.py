@@ -58,6 +58,13 @@ DEFAULT_POL_PARAMS = {"peakNo": 0, "beta": 2.0, "setPlin": None, "setPhi": None,
 
 LOADER_KEYS_FOR_CALIBRATION = ("pulseOffset", "pulsePeriod", "pulseWindow", "sampleShift", "baselineRegion")
 
+# Loader settings that change the loaded traces (the channel selection is tracked separately)
+LOADER_KEYS_FOR_DATA = ("adcPath", "pulseOffset", "pulsePeriod", "nPulses", "pulseWindow", "baselineRegion", "invert",
+                        "sampleShift")
+
+# How far update() brings the data products: 0 loaded, 1 processed, 2 peak results, 3 polarization fit
+LEVEL_LOADED, LEVEL_PROCESSED, LEVEL_RESULTS, LEVEL_POLARIZATION = range(4)
+
 
 def _gitCommit(path):
     try:
@@ -164,6 +171,11 @@ class AnalysisSession:
         self.calibrationMeta = {}
         self.polarization = None   # dict with params / errors
         self.calibrateObj = None
+        # What each product was made from, so update() only recomputes what changed (see update)
+        self.productSig = {}
+        self.processedVersion = 0       # bumped whenever all processed traces are recomputed
+        self.resultsDetectors = set()   # detectors the peak finder ran on (a detector may have no peaks)
+        self.polarizationInputs = None
 
     def close(self):
         """Release files and worker processes."""
@@ -204,7 +216,16 @@ class AnalysisSession:
         return self.overview
 
     def load(self, files=None, trainStart=None, trainStop=None, trainStep=None, channels=None):
-        """Open the selected files, cut pulses and apply the loader's default preprocessing (lazy)."""
+        """Open the selected files, cut pulses and apply the loader's default preprocessing (lazy).
+        Drops every data product derived from earlier data."""
+        self.processed = self.peakFinder = self.results = None
+        self.resultsDetectors = set()
+        self.productSig = {}
+        self._openData(files, trainStart, trainStop, trainStep, channels)
+        return self
+
+    def _openData(self, files=None, trainStart=None, trainStop=None, trainStep=None, channels=None):
+        """Open the files lazily for the selected channels without touching processed data / results."""
         files = [str(f) for f in (files if files is not None else self.state["files"])]
         if not files:
             raise ValueError("No files selected")
@@ -212,16 +233,14 @@ class AnalysisSession:
                            "trainStep": trainStep, "channels": channels})
         if self.loader is not None:
             self.loader.close()
-        self.processed = self.peakFinder = self.results = None
         self.loader = FlashH5Loader(files, config=self.loaderConfig)
         self.loader.load(trainStart=trainStart, trainStop=trainStop, trainStep=trainStep,
                          channels=channels, photonEnergy=self.state["photonEnergy"])
-        tof = self.loaderConfig.get("ToF")
-        if channels is not None:
-            tof = [c for c in (tof or channels) if c in channels]
+        # The ticked channels decide; the config's ToF list is only the default selection
+        tof = list(channels) if channels is not None else self.loaderConfig.get("ToF")
         self.loader.defaultPreprocessing(ToF=tof)
         self.raw = self.loader.data
-        return self
+        self.productSig["raw"] = self._rawSignature()
 
     def refreshPulseSplit(self):
         """Re-cut the pulses after pulseOffset / pulsePeriod / nPulses / pulseWindow changed."""
@@ -274,26 +293,36 @@ class AnalysisSession:
         pf = self.runSteps(rawSubset.copy(), steps, log=log)
         return rawSubset, pf.data.compute()
 
+    def _computeProcessed(self, detectors, log=print):
+        """Step chain for the given detectors (worker pool when worthwhile). Returns in-memory data."""
+        detectors = [int(d) for d in detectors]
+        if self.nWorkers() > 1 and len(detectors) > 1:
+            from . import parallel
+            log(f"Preprocessing {len(detectors)} detectors in {min(self.nWorkers(), len(detectors))} worker processes")
+            return parallel.preprocess(self, self.executor(), self.state["steps"], log=log, detectors=detectors)
+        return self.runSteps(self.raw.sel(detector=detectors), log=log).data.compute()
+
+    def _hasGlobalStep(self):
+        from .parallel import GLOBAL_STEPS
+        return any(s.get("enabled") and s["name"] in GLOBAL_STEPS for s in self.state["steps"])
+
     def applySteps(self, log=print):
         if self.raw is None:
             raise ValueError("Load data first")
-        if self.nWorkers() > 1:
-            from . import parallel
-            log(f"Preprocessing {self.raw.sizes['detector']} detectors in {self.nWorkers()} worker processes")
-            self.processed = parallel.preprocess(self, self.executor(), self.state["steps"], log=log)
-        else:
-            self.processed = self.runSteps(self.raw, log=log).data.compute()
+        self.processed = self._computeProcessed(self.raw["detector"].values, log=log)
+        self.processedVersion += 1
+        self.productSig["processed"] = self._processedSignature()
         self.peakFinder = None
         self.results = None
+        self.resultsDetectors = set()
+        self.productSig.pop("results", None)
         return self.processed
 
     # ------------------------------------------------------------------ peaks
-    def findPeaks(self, params=None, data=None):
-        params = dict(params or self.state["peaks"])
-        self.state["peaks"] = params
-        data = data if data is not None else (self.processed if self.processed is not None else None)
-        if data is None:
-            raise ValueError("Apply the preprocessing first")
+    @staticmethod
+    def _peakArguments(params):
+        """PeakFinder.process kwargs from the GUI parameters (the stored parameters stay untouched)."""
+        params = dict(params)
         roi = params.get("roi") or [None, None]
         params["roi"] = [None if v in ("", None) else int(v) for v in roi]
         # The baseline walk needs both slopeLength and maxSlope, but process() starts it when either is set
@@ -301,15 +330,169 @@ class AnalysisSession:
             missing = "slopeLength" if params.get("slopeLength") is False else "maxSlope"
             params[missing] = PEAK_TOGGLES[missing][0]
             print(f"Per-peak baseline: {missing} not set, using {params[missing]}")
-        self.peakFinder = PeakFinder(data, config=self.config["PeakFinder"])
+        return params
+
+    def _computeResults(self, data, log=print):
+        """Peak finding on data (any subset of detectors); returns enriched results."""
+        args = self._peakArguments(self.state["peaks"])
         if self.nWorkers() > 1 and data.sizes["detector"] > 1:
             from . import parallel
-            self.peakFinder.results = parallel.findPeaks(self, self.executor(), data, params)
+            results = parallel.findPeaks(self, self.executor(), data, args, log=log)
         else:
-            self.peakFinder.process(**params)
-        self.results = self.enrichResults(self.peakFinder.results)
+            pf = PeakFinder(data, config=self.config["PeakFinder"])
+            pf.process(**args)
+            results = pf.results
+        return self.enrichResults(results)
+
+    def findPeaks(self, params=None, data=None):
+        self.state["peaks"] = dict(params or self.state["peaks"])
+        data = data if data is not None else self.processed
+        if data is None:
+            raise ValueError("Apply the preprocessing first")
+        self.results = self._computeResults(data)
+        self.resultsDetectors = {int(d) for d in data["detector"].values}
+        self.productSig["results"] = self._resultsSignature()
+        self.peakFinder = PeakFinder(data, config=self.config["PeakFinder"])
         self.peakFinder.results = self.results
         return self.results
+
+    # ------------------------------------------------------------------ incremental update
+    def _rawSignature(self):
+        s = self.state
+        return json.dumps(_jsonable({"files": s["files"], "trains": [s["trainStart"], s["trainStop"], s["trainStep"]],
+                                     "loader": {k: self.loaderConfig.get(k) for k in LOADER_KEYS_FOR_DATA}}),
+                          sort_keys=True, default=str)
+
+    def _processedSignature(self):
+        steps = [{"name": st["name"], "params": st.get("params", {})} for st in self.state["steps"] if st.get("enabled")]
+        return self._rawSignature() + json.dumps(_jsonable(steps), sort_keys=True, default=str)
+
+    def _resultsSignature(self):
+        return (self._processedSignature() + f"|v{self.processedVersion}|"
+                + json.dumps(_jsonable(self.state["peaks"]), sort_keys=True, default=str))
+
+    def _polarizationSignature(self):
+        trans = self.transmissionCalib
+        return json.dumps(_jsonable({"params": self.state["polarization"], "results": self.productSig.get("results"),
+                                     "detectors": sorted(self.resultsDetectors),
+                                     "transmission": None if trans is None else trans.to_json()}),
+                          sort_keys=True, default=str)
+
+    def polarizationIsCurrent(self):
+        return self.polarization is not None and self.polarizationInputs == self._polarizationSignature()
+
+    def update(self, files, trainStart, trainStop, trainStep, channels, level, log=print):
+        """
+        Bring the data products up to ``level`` (LEVEL_*) for this selection, recomputing only what changed.
+
+        - Products made from other files / trains / pulse split / steps / peak settings are outdated: they are
+          recomputed if needed for ``level``, otherwise dropped.
+        - Deselected channels are removed from every product without recomputing anything.
+        - Newly selected channels run through the pipeline on their own and are merged in; products beyond
+          ``level`` keep their channels until an update reaches their level. A global step (normalize) makes
+          the processed data depend on all channels, so adding one then reprocesses everything.
+
+        Returns {"actions": [...], "reloaded": bool, "fitPolarization": bool}. The polarization fit itself runs
+        in the GUI (it draws into a figure).
+        """
+        if not channels:
+            raise ValueError("No ADC channels selected")
+        actions = []
+        channels = sorted(int(c) for c in channels)
+        rawDets = set(self.raw["detector"].values.tolist()) if self.raw is not None else set()
+        self.state.update({"files": [str(f) for f in files], "trainStart": trainStart, "trainStop": trainStop,
+                           "trainStep": trainStep})
+
+        reloaded = (self.raw is None or self.productSig.get("raw") != self._rawSignature()
+                    or rawDets != set(channels))
+        if reloaded:
+            self._openData(files, trainStart, trainStop, trainStep, channels)   # lazy: cheap
+            actions.append("opened files")
+        dets = [int(d) for d in self.raw["detector"].values]
+        notInFiles = sorted(set(channels) - set(dets))
+        if notInFiles:
+            actions.append(f"channels {notInFiles} not in the files")
+
+        # processed traces
+        if self.processed is not None and self.productSig.get("processed") != self._processedSignature():
+            self.processed = None
+            actions.append("processed data outdated (other data or steps)")
+        if self.processed is not None:
+            have = [int(d) for d in self.processed["detector"].values]
+            removed = [d for d in have if d not in dets]
+            if removed:
+                self.processed = self.processed.sel(detector=[d for d in have if d in dets])
+                actions.append(f"removed ToF {removed} from processed data")
+        have = [] if self.processed is None else [int(d) for d in self.processed["detector"].values]
+        missing = [d for d in dets if d not in have]
+        if level >= LEVEL_PROCESSED and missing:
+            if not have or self._hasGlobalStep():
+                if have:
+                    actions.append("normalize spans all detectors: reprocessing all")
+                self.processed = self._computeProcessed(dets, log=log)
+                self.processedVersion += 1
+                actions.append(f"processed ToF {dets}")
+            else:
+                new = self._computeProcessed(missing, log=log)
+                self.processed = xr.concat([self.processed, new], dim="detector").sortby("detector")
+                actions.append(f"processed new ToF {missing}")
+            self.productSig["processed"] = self._processedSignature()
+
+        # peak results
+        if self.results is not None and self.productSig.get("results") != self._resultsSignature():
+            self.results, self.resultsDetectors = None, set()
+            actions.append("peak results outdated (other processed data or peak settings)")
+        if self.results is not None:
+            removed = sorted(self.resultsDetectors - set(dets))
+            if removed:
+                self.results = self.results[~self.results["detector"].isin(removed)].reset_index(drop=True)
+                self.resultsDetectors -= set(removed)
+                actions.append(f"removed ToF {removed} from peak results")
+        if level >= LEVEL_RESULTS and self.processed is not None:
+            missing = [d for d in (int(x) for x in self.processed["detector"].values) if d not in self.resultsDetectors]
+            if missing:
+                new = self._computeResults(self.processed.sel(detector=missing), log=log)
+                parts = [r for r in (self.results, new) if r is not None and len(r)]
+                self.results = (pd.concat(parts, ignore_index=True)
+                                .sort_values(["detector", "trainId", "pulseId", "peakNo"]).reset_index(drop=True)
+                                if parts else new)
+                self.resultsDetectors |= set(missing)
+                actions.append(f"found peaks for ToF {missing}")
+            self.productSig["results"] = self._resultsSignature()
+        if self.processed is not None and self.results is not None:
+            self.peakFinder = PeakFinder(self.processed, config=self.config["PeakFinder"])
+            self.peakFinder.results = self.results
+        elif self.results is None:
+            self.peakFinder = None
+
+        # polarization: a fit over all detectors, so any change of its inputs makes it stale
+        fit = False
+        if self.polarization is not None and not self.polarizationIsCurrent():
+            self.polarization = None
+            actions.append("polarization fit outdated")
+        if level >= LEVEL_POLARIZATION and self.results is not None and len(self.results):
+            fit = self.polarization is None
+        if not actions:
+            actions.append("nothing to do")
+        for a in actions:
+            log(f"Update: {a}")
+        return {"actions": actions, "reloaded": reloaded, "fitPolarization": fit}
+
+    def productStatus(self):
+        """Which selected channels each product holds."""
+        if self.raw is None:
+            return ""
+        dets = [int(d) for d in self.raw["detector"].values]
+        lines = []
+        if self.processed is not None:
+            have = [int(d) for d in self.processed["detector"].values]
+            missing = [d for d in dets if d not in have]
+            lines.append(f"processed: {len(have)}/{len(dets)} channels" + (f" (missing {missing})" if missing else ""))
+        if self.results is not None:
+            missing = [d for d in dets if d not in self.resultsDetectors]
+            lines.append(f"peaks: {len(self.resultsDetectors & set(dets))}/{len(dets)} channels"
+                         + (f" (missing {missing})" if missing else ""))
+        return "\n".join(lines)
 
     def enrichResults(self, results):
         """Add Angles, daq_run and Photon Energy columns (needed by Calibrate / Fitter / Plotter)."""
@@ -442,6 +625,7 @@ class AnalysisSession:
         fitParams, errors = fitter.pol(transParam=transParam, plot=ax is not None, ax=ax, savename=False,
                                        show=False, **params)
         names = ["Plin", "phi", "scale"] + (["beta2"] if params.get("fitBeta") else [])
+        self.polarizationInputs = self._polarizationSignature()
         self.polarization = {
             "params": {n: float(v) for n, v in zip(names, fitParams)},
             "errors": {n: float(e) for n, e in zip(names, errors)},
@@ -538,4 +722,12 @@ class AnalysisSession:
         if (folder / "session.json").exists():
             with open(folder / "session.json", encoding="utf-8") as f:
                 session.polarization = json.load(f).get("polarization")
+        # The saved products were made from the saved settings: an update can reuse them after reloading the files
+        if session.processed is not None:
+            session.productSig["processed"] = session._processedSignature()
+        if session.results is not None:
+            session.resultsDetectors = {int(d) for d in session.results["detector"].unique()}
+            session.productSig["results"] = session._resultsSignature()
+        if session.polarization is not None:
+            session.polarizationInputs = session._polarizationSignature()
         return session

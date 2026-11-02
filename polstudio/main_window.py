@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QMainWindow
 
 from . import RESULTS_DIR, __version__
 from .export import defaultSessionFolder, exportSession
-from .session import AnalysisSession
+from .session import LEVEL_LOADED, LEVEL_POLARIZATION, LEVEL_PROCESSED, LEVEL_RESULTS, AnalysisSession
 from .widgets.calibration_tab import CalibrationTab
 from .widgets.data_panel import DataPanel
 from .widgets.inspect_tab import InspectTab
@@ -99,6 +99,9 @@ class MainWindow(QMainWindow):
     def _connect(self):
         self.dataPanel.folderRequested.connect(self.openFolder)
         self.dataPanel.loadRequested.connect(self.loadSelection)
+        self.dataPanel.updateRequested.connect(self.updateSelection)
+        self.tabs.currentChanged.connect(lambda _: self.dataPanel.setUpdateTarget(self.tabs.tabText(self.tabs.currentIndex())))
+        self.dataPanel.setUpdateTarget(self.tabs.tabText(self.tabs.currentIndex()))
         self.inspectTab.recutRequested.connect(self.recut)
         self.inspectTab.trainChanged.connect(self.preprocessTab.setStartTrain)
         self.preprocessTab.previewRequested.connect(self.preview)
@@ -170,6 +173,55 @@ class MainWindow(QMainWindow):
         self.runTask(lambda: self.session.load(**selection), lambda _: self.onDataLoaded(),
                      f"Loading {len(selection['files'])} file(s)")
 
+    def _tabLevel(self):
+        """How far 'Update' runs the pipeline for the selected tab."""
+        tab = self.tabs.currentWidget()
+        if tab is self.polarizationTab:
+            return LEVEL_POLARIZATION
+        if tab in (self.peaksTab, self.calibrationTab):
+            return LEVEL_RESULTS
+        if tab in (self.preprocessTab, self.heatmapTab):
+            return LEVEL_PROCESSED
+        return LEVEL_LOADED
+
+    def updateSelection(self, selection):
+        """Run the pipeline for the selection up to the selected tab, recomputing only what changed."""
+        if not selection["files"]:
+            return self.error("Select files first")
+        # Settings as currently shown in the tabs
+        self.inspectTab.applySettingsToConfig()
+        self.preprocessTab.steps()
+        self.peaksTab.params()
+        self.polarizationTab.params()
+        level = self._tabLevel()
+        tab = self.tabs.tabText(self.tabs.currentIndex())
+        self.runTask(lambda: self.session.update(level=level, **selection), self.onUpdated,
+                     f"Updating up to {tab}")
+
+    def onUpdated(self, report):
+        if report["reloaded"]:
+            self.onDataLoaded()
+        else:
+            self.onProcessedChanged()
+            self.onResultsChanged()
+            self._refreshInfo()
+        self.preprocessTab.restrictPreview(self.session.raw["detector"].values)
+        if report["fitPolarization"]:
+            self.fitPolarization(self.polarizationTab.params())
+        elif self.session.polarization is None:
+            self.polarizationTab.markOutdated()
+        self.statusBar().showMessage("Update: " + "; ".join(report["actions"]), 10000)
+
+    def _refreshInfo(self):
+        s = self.session
+        if s.raw is None:
+            return
+        raw = s.raw
+        text = (f"Loaded {len(s.trainIds())} trains, {raw.sizes['pulse']} pulses, {raw.sizes['detector']} detectors, "
+                f"{raw.sizes['sample']} samples/pulse.\nPulse starts: {s.loader.pulseStarts.tolist()}")
+        status = s.productStatus()
+        self.dataPanel.setLoadedInfo(text + (f"\n{status}" if status else ""))
+
     def recut(self):
         if self.session.loader is None:
             self.inspectTab.applySettingsToConfig()
@@ -179,12 +231,7 @@ class MainWindow(QMainWindow):
 
     def onDataLoaded(self):
         s = self.session
-        tids = s.trainIds()
-        raw = s.raw
-        starts = s.loader.pulseStarts.tolist()
-        self.dataPanel.setLoadedInfo(
-            f"Loaded {len(tids)} trains, {raw.sizes['pulse']} pulses, {raw.sizes['detector']} detectors, "
-            f"{raw.sizes['sample']} samples/pulse.\nPulse starts: {starts}")
+        self._refreshInfo()
         self.inspectTab.onDataLoaded()
         self.calibrationTab.onDataLoaded()
         self.onProcessedChanged()
@@ -212,6 +259,7 @@ class MainWindow(QMainWindow):
             self.preprocessTab.setProcessedInfo(f"Processed data: {dict(p.sizes)}")
         self.peaksTab.onProcessedChanged()
         self.heatmapTab.onProcessedChanged()
+        self._refreshInfo()
         self.polarizationTab.onProcessedChanged()
 
     def findPeaks(self, params):
@@ -223,6 +271,7 @@ class MainWindow(QMainWindow):
         self.peaksTab.onResultsChanged()
         self.calibrationTab.onResultsChanged()
         self.heatmapTab.redraw()
+        self._refreshInfo()
 
     # ------------------------------------------------------------------ calibration / polarization
     def computeEnergy(self):

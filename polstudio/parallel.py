@@ -114,11 +114,11 @@ def splitPhases(steps):
     return phases
 
 
-def preprocess(session, executor, steps, log=print):
-    """Parallel equivalent of runStepChain(session.raw, steps).data.compute()."""
+def preprocess(session, executor, steps, log=print, detectors=None):
+    """Parallel equivalent of runStepChain(session.raw.sel(detector=detectors), steps).data.compute()."""
     from ToFPipeline import PeakFinder
     s = session.state
-    detectors = [int(d) for d in session.raw["detector"].values]
+    detectors = [int(d) for d in (detectors if detectors is not None else session.raw["detector"].values)]
     phases = splitPhases(steps)
     peakConfig = dict(session.config["PeakFinder"])
     needsGMD = any(st["name"] == "filterByIntensity" for _, seg in phases for st in seg)

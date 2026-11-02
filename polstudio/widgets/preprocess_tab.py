@@ -205,5 +205,14 @@ class PreprocessTab(QWidget):
                     plot.plot(raw["sample"].values, r * scale, pen=pg.mkPen(TOL["grey"], width=1))
             plot.plot(x, y, pen=pg.mkPen(TOL["blue"], width=1))
 
+    def restrictPreview(self, detectors):
+        """Drop deselected channels from the current preview (new channels appear with the next preview)."""
+        if self._processed is None:
+            return
+        keep = [d for d in self._processed["detector"].values if d in set(detectors)]
+        self._processed = self._processed.sel(detector=keep)
+        self._raw = self._raw.sel(detector=[d for d in self._raw["detector"].values if d in set(detectors)])
+        self.redraw()
+
     def setProcessedInfo(self, text):
         self.statusLabel.setText(text)

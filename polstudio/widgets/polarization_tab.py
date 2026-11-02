@@ -82,6 +82,11 @@ class PolarizationTab(QWidget):
         data = self.session.processed
         self.pulseSpin.setMaximum(max((data.sizes["pulse"] if data is not None else 1) - 1, 0))
 
+    def markOutdated(self):
+        if self.resultLabel.text() and not self.resultLabel.text().startswith("Outdated"):
+            self.resultLabel.setText("Outdated – the channel selection or inputs changed; fit again\n\n"
+                                     + self.resultLabel.text())
+
     def resetPolAxis(self):
         self.figure.delaxes(self.polAx)
         self.polAx = self.figure.add_subplot(1, 2, 1, projection="polar")

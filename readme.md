@@ -31,6 +31,23 @@ saved session, `--config <config.yaml>` uses another pipeline config (default `T
 | 6. Polarization | **Polarization** | `Fitter.pol` with optional transmission correction, and the `Plotter` polar intensity map of one pulse. |
 | 7. Save | *File → Save session…* (Ctrl+S) or *Quick save* | Writes a session folder (below). *File → Open session…* restores settings, peaks, calibration and processed traces; *Load selection* reloads the raw data. |
 
+## Update button
+
+*Update → <tab>* (next to *Load selection*) runs the pipeline for the current selection up to the selected
+tab: Inspect = load, Preprocess / Heatmap = processed traces, Peaks / Calibration = peak results,
+Polarization = peak results and the polarization fit. Only what changed is recomputed:
+
+- unticked ADC channels are removed from the processed data and peak results without recomputing;
+- newly ticked channels are loaded, processed and peak-searched on their own and merged in; products
+  beyond the selected tab keep their channels and are completed by a later update on their tab (the Data
+  dock shows e.g. `peaks: 13/14 channels (missing [13])`);
+- results made with other files, trains, pulse split, preprocessing steps or peak settings are redone
+  when the selected tab needs them, otherwise dropped;
+- with `normalize` enabled the processed traces depend on all channels, so adding one reprocesses all;
+- the polarization fit is redone on the Polarization tab when its inputs changed, otherwise marked outdated.
+
+Calibrations are never recomputed by *Update*. *Load selection* still starts from scratch.
+
 ## Parallel processing
 
 *Apply to all* and *Find peaks* run one detector per worker process (setting *worker processes* in the

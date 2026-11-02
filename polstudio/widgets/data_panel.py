@@ -12,6 +12,7 @@ from .params import fromText, toText
 class DataPanel(QWidget):
     folderRequested = pyqtSignal(str)
     loadRequested = pyqtSignal(dict)
+    updateRequested = pyqtSignal(dict)
 
     def __init__(self, session, parent=None):
         super().__init__(parent)
@@ -60,10 +61,21 @@ class DataPanel(QWidget):
         workers.addRow("worker processes", self.workersSpin)
         layout.addLayout(workers)
 
+        buttons = QHBoxLayout()
         self.loadButton = QPushButton("Load selection")
         self.loadButton.setEnabled(False)
+        self.loadButton.setToolTip("Load the selection from scratch (drops processed data and peaks)")
         self.loadButton.clicked.connect(self._emitLoad)
-        layout.addWidget(self.loadButton)
+        buttons.addWidget(self.loadButton)
+        self.updateButton = QPushButton("Update")
+        self.updateButton.setEnabled(False)
+        self.updateButton.setToolTip(
+            "Run the pipeline for the current selection up to the selected tab, recomputing only what changed:\n"
+            "deselected channels are removed, newly ticked channels are processed on their own and merged in;\n"
+            "results made with other files, trains, pulse split, steps or peak settings are redone.")
+        self.updateButton.clicked.connect(lambda: self.updateRequested.emit(self.selection()))
+        buttons.addWidget(self.updateButton)
+        layout.addLayout(buttons)
         self.infoLabel = QLabel("")
         self.infoLabel.setWordWrap(True)
         layout.addWidget(self.infoLabel)
@@ -144,6 +156,10 @@ class DataPanel(QWidget):
 
     def _itemChanged(self, *args):
         self.loadButton.setEnabled(bool(self.selectedFiles()))
+        self.updateButton.setEnabled(bool(self.selectedFiles()))
+
+    def setUpdateTarget(self, tabName):
+        self.updateButton.setText(f"Update → {tabName}")
 
     def selectedFiles(self):
         files = []
