@@ -129,6 +129,9 @@ class PolarizationTab(QWidget):
         self.phiPlot.setXLink(self.plinPlot)
         for plot in (self.plinPlot, self.phiPlot):
             plot.showGrid(x=True, y=True, alpha=0.3)
+            for side in ("left", "bottom"):
+                # plain values: no automatic "(×0.001)" rescaling of P_lin, photon energy, …
+                plot.getAxis(side).enableAutoSIPrefix(False)
         overview.addWidget(self.overviewView)
         self.overviewModel = PandasModel()
         overview.addWidget(makeTableView(self.overviewModel))
