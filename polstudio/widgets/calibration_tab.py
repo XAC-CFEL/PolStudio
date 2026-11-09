@@ -38,8 +38,8 @@ class CalibrationTab(QWidget):
         sideLayout = QVBoxLayout(side)
         energies = QGroupBox("Photon energy per run (eV)")
         energiesLayout = QVBoxLayout(energies)
-        energiesLayout.addWidget(QLabel("Values from the files come from the wavelength channel; "
-                                        "type an override to correct them."))
+        energiesLayout.addWidget(QLabel("Values from the files come from the wavelength channel (.h5) or the "
+                                        "monochromator energy (.nxs); type an override to correct them."))
         self.energyModel = PandasModel(editableColumns=("override",))
         self.energyTable = makeTableView(self.energyModel)
         self.energyTable.setMaximumHeight(180)

@@ -19,6 +19,7 @@ import yaml
 from . import DEFAULT_CONFIG, ROOT, __version__
 from ToFPipeline import (GlobalConfig, FlashH5Loader, PeakFinder, Calibrate, Fitter,  # noqa: E402
                          saveCalibration, loadCalibration, energyCalibFunc)
+from .loaders import LOADERS, configKey, filesFormat, folderFormat, loaderClass  # noqa: E402
 
 SESSION_KEY = "PolStudio"
 
@@ -60,7 +61,7 @@ LOADER_KEYS_FOR_CALIBRATION = ("pulseOffset", "pulsePeriod", "pulseWindow", "sam
 
 # Loader settings that change the loaded traces (the channel selection is tracked separately)
 LOADER_KEYS_FOR_DATA = ("adcPath", "pulseOffset", "pulsePeriod", "nPulses", "pulseWindow", "baselineRegion", "invert",
-                        "sampleShift")
+                        "sampleShift", "roi")
 
 # How far update() brings the data products: 0 loaded, 1 processed, 2 peak results, 3 polarization fit
 LEVEL_LOADED, LEVEL_PROCESSED, LEVEL_RESULTS, LEVEL_POLARIZATION = range(4)
@@ -121,7 +122,8 @@ class AnalysisSession:
         GlobalConfig.load(self.configPath)
         # Shared with GlobalConfig so every pipeline class sees the GUI's edits
         self.config = GlobalConfig._config
-        self.config.setdefault("FlashH5Loader", {})
+        for fmt in LOADERS:
+            self.config.setdefault(configKey(fmt), {})
         self.config.setdefault("PeakFinder", {})
         self.config.setdefault("Calibrate", {})
         self._executor = None
@@ -142,6 +144,7 @@ class AnalysisSession:
     def _defaultState():
         return {
             "dataFolder": None,
+            "dataFormat": "h5",          # "h5" (FLASH DAQ, FlashH5Loader) or "nxs" (P04 NeXus, NXSLoader)
             "files": [],
             "channels": None,
             "trainStart": None, "trainStop": None, "trainStep": None,
@@ -205,16 +208,26 @@ class AnalysisSession:
 
     @property
     def loaderConfig(self):
-        return self.config["FlashH5Loader"]
+        """Config section of the current data format's loader."""
+        return self.config.setdefault(configKey(self.state["dataFormat"]), {})
+
+    @property
+    def splitsPulses(self):
+        """Whether the loader cuts train traces into pulses (FLASH HDF5); .nxs files hold one trace per point."""
+        return self.state["dataFormat"] == "h5"
 
     @property
     def sampleRate(self):
-        return float(self.loaderConfig.get("sampleRate", 1.8e9))
+        rate = self.loaderConfig.get("sampleRate") or getattr(self.loader, "sampleRate", None)
+        return float(rate or 1.8e9)
 
     # ------------------------------------------------------------------ files
     def scan(self, folder):
         self.state["dataFolder"] = str(folder)
-        self.overview = FlashH5Loader.scan(folder)
+        fmt = folderFormat(folder)
+        if fmt != self.state["dataFormat"]:
+            self.state.update({"dataFormat": fmt, "channels": None})   # channel numbers differ between formats
+        self.overview = loaderClass(fmt).scan(folder)
         return self.overview
 
     def load(self, files=None, trainStart=None, trainStop=None, trainStep=None, channels=None):
@@ -233,9 +246,10 @@ class AnalysisSession:
             raise ValueError("No files selected")
         self.state.update({"files": files, "trainStart": trainStart, "trainStop": trainStop,
                            "trainStep": trainStep, "channels": channels})
+        self.state["dataFormat"] = filesFormat(files)
         if self.loader is not None:
             self.loader.close()
-        self.loader = FlashH5Loader(files, config=self.loaderConfig)
+        self.loader = loaderClass(self.state["dataFormat"])(files, config=self.loaderConfig)
         self.loader.load(trainStart=trainStart, trainStop=trainStop, trainStep=trainStep,
                          channels=channels, photonEnergy=self.state["photonEnergy"])
         # The ticked channels decide; the config's ToF list is only the default selection
@@ -271,6 +285,10 @@ class AnalysisSession:
         helper = self.loader or FlashH5Loader([], config=self.loaderConfig)
         helper.config = self.loaderConfig
         return helper.pulseStartIndices(nSamplesTrain)
+
+    def pulsesOfTrain(self, trainId):
+        """Pulses of one train after the loader's default preprocessing: DataArray (detector, pulse, sample)."""
+        return self._subsetTrains(self.raw, [trainId]).compute()
 
     def gmdOfTrain(self, trainId):
         pe = self.loader.pulseEnergy if self.loader is not None else None
@@ -531,10 +549,13 @@ class AnalysisSession:
     # ------------------------------------------------------------------ calibration
     def calibrationSettingsSnapshot(self):
         snapshot = {k: _jsonable(self.loaderConfig.get(k)) for k in LOADER_KEYS_FOR_CALIBRATION}
+        snapshot["dataFormat"] = self.state["dataFormat"]
         cfg = self.loaderConfig
-        # Store the window actually used (null in the config means "full period")
-        snapshot["pulseWindow"] = FlashH5Loader.windowLength(float(cfg.get("pulsePeriod", 0.0)), cfg.get("pulseWindow"),
-                                                             int(cfg.get("nPulses", 1)), warn=False)
+        if self.splitsPulses:
+            # Store the window actually used (null in the config means "full period")
+            snapshot["pulseWindow"] = FlashH5Loader.windowLength(float(cfg.get("pulsePeriod", 0.0)),
+                                                                 cfg.get("pulseWindow"), int(cfg.get("nPulses", 1)),
+                                                                 warn=False)
         return snapshot
 
     def computeEnergyCalibration(self, peakNo=None, bindingEnergy=None):
@@ -660,12 +681,14 @@ class AnalysisSession:
                          "trainId min": int(tids.min()) if len(tids) else None,
                          "trainId max": int(tids.max()) if len(tids) else None,
                          "runs": sorted({int(r) for r in self.loader.trainTraces["daq_run"].values}),
-                         "pulseStarts": _jsonable(self.loader.pulseStarts.to_dict())}
+                         "pulseStarts": None if self.loader.pulseStarts is None
+                         else _jsonable(self.loader.pulseStarts.to_dict())}
         return {
             "created": datetime.datetime.now().isoformat(timespec="seconds"),
             "polstudio": {"version": __version__, "commit": _gitCommit(ROOT)},
             "tofpipeline": {"commit": _gitCommit(ROOT / "ToFPipeline")},
             "baseConfig": str(self.configPath),
+            "dataFormat": self.state["dataFormat"],
             "files": self.state["files"],
             "selection": selection,
             "steps": [s["name"] for s in self.state["steps"] if s.get("enabled")],

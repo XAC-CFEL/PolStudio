@@ -13,8 +13,8 @@ def defaultSessionFolder(session):
     if session.loader is not None:
         runs = sorted({int(r) for r in session.loader.trainTraces["daq_run"].values})
     elif session.state.get("files"):
-        from ToFPipeline import FlashH5Loader
-        runs = sorted({FlashH5Loader.runNumber(f) for f in session.state["files"]} - {None})
+        from .loaders import runNumber
+        runs = sorted({runNumber(f) for f in session.state["files"]} - {None})
     label = "-".join(str(r) for r in runs[:4]) + ("+" if len(runs) > 4 else "") if runs else "session"
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     return RESULTS_DIR / f"{label}_{stamp}"

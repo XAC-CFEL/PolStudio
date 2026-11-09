@@ -1,12 +1,39 @@
 """Left dock: choose a data folder, select runs/files, train range and channels."""
 import os
 
-import numpy as np
+import pandas as pd
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QSpinBox, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .params import fromText, toText
+
+# Tree columns per data format; a run row sums / spans its files
+COLUMNS = {"h5": ["Run / file", "Trains", "trainId range", "λ (nm)", "Created"],
+           "nxs": ["Run / file", "Points", "Samples", "E (eV)", "Started"]}
+SLICE_TITLES = {"h5": "Trains (positional slice per file)", "nxs": "Scan points (positional slice per file)"}
+
+
+def _columnTexts(rows, fmt):
+    """Texts of columns 1-4 for a run (several files) or a single file."""
+    def values(col):
+        return rows[col].dropna() if col in rows else pd.Series(dtype=float)
+
+    def total(col):
+        v = values(col)
+        return str(int(v.sum())) if len(v) else ""
+
+    def first(col, spec):
+        v = values(col)
+        return format(v.iloc[0], spec) if len(v) else ""
+
+    created = values("created")
+    created = str(created.min()) if len(created) else ""
+    if fmt == "nxs":
+        return [total("nPoints"), first("nSamples", ".0f"), first("photonEnergy", ".1f"), created]
+    lo, hi = values("trainId min"), values("trainId max")
+    span = f"{int(lo.min())} – {int(hi.max())}" if len(lo) and len(hi) else ""
+    return [total("nTrains"), span, first("wavelength", ".3f"), created]
 
 
 class DataPanel(QWidget):
@@ -29,12 +56,13 @@ class DataPanel(QWidget):
         layout.addWidget(self.folderLabel)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Run / file", "Trains", "trainId range", "λ (nm)", "Created"])
+        self.tree.setHeaderLabels(COLUMNS[self.session.state["dataFormat"]])
         self.tree.setRootIsDecorated(True)
         self.tree.itemChanged.connect(self._itemChanged)
         layout.addWidget(self.tree, stretch=1)
 
-        trains = QGroupBox("Trains (positional slice per file)")
+        trains = QGroupBox(SLICE_TITLES[self.session.state["dataFormat"]])
+        self.trainsBox = trains
         grid = QGridLayout(trains)
         self.trainEdits = {}
         for col, key in enumerate(("trainStart", "trainStop", "trainStep")):
@@ -95,37 +123,40 @@ class DataPanel(QWidget):
         self.channelBoxes = {}
         angles = self._angles()
         selected = self.session.state.get("channels") or self.session.loaderConfig.get("ToF") or list(channels)
+        nxs = self.session.state["dataFormat"] == "nxs"
         for i, ch in enumerate(channels):
             angle = angles.get(ch)
-            box = QCheckBox(f"CH{ch:02d}" + (f" {angle:g}°" if angle is not None else ""))
+            # .nxs detectors are numbered from 0 but stored as histogram_ch01, ch02, …
+            box = QCheckBox((f"ToF {ch}" if nxs else f"CH{ch:02d}") + (f" {angle:g}°" if angle is not None else ""))
+            if nxs:
+                box.setToolTip(f"histogram_ch{ch + 1:02d}")
             box.setChecked(ch in selected)
             self.channelGrid.addWidget(box, i // 4, i % 4)
             self.channelBoxes[ch] = box
 
     def chooseFolder(self):
         start = self.session.state.get("dataFolder") or ""
-        folder = QFileDialog.getExistingDirectory(self, "Select folder with FLASH HDF5 files", start)
+        folder = QFileDialog.getExistingDirectory(self, "Select folder with FLASH HDF5 or P04 .nxs files", start)
         if folder:
             self.folderRequested.emit(folder)
 
     def setOverview(self, overview, folder):
-        """Fill the run/file tree from FlashH5Loader.scan()."""
+        """Fill the run/file tree from the loader's scan() (FlashH5Loader or NxsFileLoader)."""
+        fmt = self.session.state["dataFormat"]
         self.folderLabel.setText(str(folder))
         self.tree.blockSignals(True)
         self.tree.clear()
+        self.tree.setHeaderLabels(COLUMNS[fmt])
+        self.trainsBox.setTitle(SLICE_TITLES[fmt])
         selectedFiles = set(self.session.state.get("files") or [])
         if overview is None or overview.empty:
-            self.folderLabel.setText(f"{folder}\nNo .h5 files found")
+            self.folderLabel.setText(f"{folder}\nNo .h5 or .nxs files found")
         else:
             for run, group in overview.groupby("run", dropna=False):
                 runItem = QTreeWidgetItem(self.tree)
                 runItem.setText(0, f"Run {run}")
-                runItem.setText(1, str(int(group["nTrains"].sum())) if "nTrains" in group else "")
-                runItem.setText(2, f"{int(group['trainId min'].min())} – {int(group['trainId max'].max())}"
-                                if "trainId min" in group else "")
-                wl = group["wavelength"].dropna() if "wavelength" in group else []
-                runItem.setText(3, f"{wl.iloc[0]:.3f}" if len(wl) else "")
-                runItem.setText(4, str(group["created"].min()) if "created" in group else "")
+                for col, text in enumerate(_columnTexts(group, fmt), 1):
+                    runItem.setText(col, text)
                 runItem.setFlags(runItem.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
                 for _, row in group.iterrows():
                     item = QTreeWidgetItem(runItem)
@@ -137,11 +168,8 @@ class DataPanel(QWidget):
                         item.setText(1, "error")
                         item.setToolTip(1, row["error"])
                         continue
-                    item.setText(1, str(int(row["nTrains"])) if not np.isnan(row.get("nTrains", np.nan)) else "")
-                    item.setText(2, f"{int(row['trainId min'])} – {int(row['trainId max'])}"
-                                 if not np.isnan(row.get("trainId min", np.nan)) else "")
-                    item.setText(3, f"{row['wavelength']:.3f}" if not np.isnan(row.get("wavelength", np.nan)) else "")
-                    item.setText(4, str(row.get("created", "")))
+                    for col, text in enumerate(_columnTexts(group.loc[[row.name]], fmt), 1):
+                        item.setText(col, text)
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     item.setCheckState(0, Qt.CheckState.Checked if row["file"] in selectedFiles
                                        else Qt.CheckState.Unchecked)

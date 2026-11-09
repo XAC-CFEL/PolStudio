@@ -167,8 +167,12 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ data
     def openFolder(self, folder):
-        self.runTask(lambda: self.session.scan(folder),
-                     lambda overview: self.dataPanel.setOverview(overview, folder), f"Scanning {folder}")
+        self.runTask(lambda: self.session.scan(folder), lambda overview: self.onScanned(overview, folder),
+                     f"Scanning {folder}")
+
+    def onScanned(self, overview, folder):
+        self.dataPanel.setOverview(overview, folder)
+        self.inspectTab.updateFormat()
 
     def loadSelection(self, selection):
         self.inspectTab.applySettingsToConfig()
@@ -219,8 +223,12 @@ class MainWindow(QMainWindow):
         if s.raw is None:
             return
         raw = s.raw
-        text = (f"Loaded {len(s.trainIds())} trains, {raw.sizes['pulse']} pulses, {raw.sizes['detector']} detectors, "
-                f"{raw.sizes['sample']} samples/pulse.\nPulse starts: {s.loader.pulseStarts.tolist()}")
+        if s.splitsPulses:
+            text = (f"Loaded {len(s.trainIds())} trains, {raw.sizes['pulse']} pulses, {raw.sizes['detector']} "
+                    f"detectors, {raw.sizes['sample']} samples/pulse.\nPulse starts: {s.loader.pulseStarts.tolist()}")
+        else:
+            text = (f"Loaded {len(s.trainIds())} runs, {raw.sizes['pulse']} scan points, {raw.sizes['detector']} "
+                    f"detectors, {raw.sizes['sample']} samples/point (.nxs).")
         status = s.productStatus()
         self.dataPanel.setLoadedInfo(text + (f"\n{status}" if status else ""))
 
@@ -437,6 +445,7 @@ class MainWindow(QMainWindow):
             widget.session = session
         self.inspectTab.loadSplitSettings(session.loaderConfig)
         self.inspectTab._updateStartsLabel()
+        self.inspectTab.updateFormat()
         self.dataPanel.workersSpin.setValue(int(session.state.get("workers") or 0))
         for key, edit in self.dataPanel.trainEdits.items():
             value = session.state.get(key)

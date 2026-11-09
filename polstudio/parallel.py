@@ -1,7 +1,7 @@
 """
 Per-detector process pool.
 
-Every worker handles one detector: it opens the HDF5 files itself and reads only its own ADC channel
+Every worker handles one detector: it opens the data files itself and reads only its own ADC channel
 (so decompression runs in parallel too), applies the loader's default preprocessing and the step chain,
 or runs PeakFinder.process on its detector's slice. Processes rather than threads are used because the
 peak finder is a Python loop that holds the GIL.
@@ -48,10 +48,10 @@ def _captured(fn, job):
 
 
 def _loadAndPreprocess(job):
-    from ToFPipeline import FlashH5Loader
+    from .loaders import loaderClass
     from .session import runStepChain
     det = job["detector"]
-    loader = FlashH5Loader(job["files"], config=job["loaderConfig"])
+    loader = loaderClass(job["format"])(job["files"], config=job["loaderConfig"])
     try:
         loader.load(trainStart=job["trainStart"], trainStop=job["trainStop"], trainStep=job["trainStep"],
                     channels=[det], key="GMD" if job["needsGMD"] else None, photonEnergy={})
@@ -122,7 +122,8 @@ def preprocess(session, executor, steps, log=print, detectors=None):
     phases = splitPhases(steps)
     peakConfig = dict(session.config["PeakFinder"])
     needsGMD = any(st["name"] == "filterByIntensity" for _, seg in phases for st in seg)
-    jobs = [{"detector": det, "files": s["files"], "loaderConfig": dict(session.loaderConfig),
+    jobs = [{"detector": det, "files": s["files"], "format": s["dataFormat"],
+             "loaderConfig": dict(session.loaderConfig),
              "trainStart": s["trainStart"], "trainStop": s["trainStop"], "trainStep": s["trainStep"],
              "steps": phases[0][1], "peakConfig": peakConfig, "needsGMD": needsGMD} for det in detectors]
     parts = _runJobs(executor, workerLoadAndPreprocess, jobs, "preprocessing", log)
@@ -145,8 +146,9 @@ def findPeaks(session, executor, data, params, log=print):
     peakConfig = dict(session.config["PeakFinder"])
     jobs = [{"detector": int(det), "data": data.sel(detector=[det]), "params": params, "peakConfig": peakConfig}
             for det in data["detector"].values]
+    # A detector without peaks returns an empty frame, which would turn the merged columns into object dtype
     parts = [r for r in _runJobs(executor, workerFindPeaks, jobs, "peak finding", log)
-             if isinstance(r, pd.DataFrame)]
+             if isinstance(r, pd.DataFrame) and len(r)]
     if not parts:
         return pd.DataFrame()
     return pd.concat(parts, ignore_index=True)

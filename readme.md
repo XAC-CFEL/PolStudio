@@ -31,6 +31,16 @@ saved session, `--config <config.yaml>` uses another pipeline config (default `T
 | 6. Polarization | **Polarization** | `Fitter.pol` with optional transmission correction, and the `Plotter` polar intensity map of one pulse. |
 | 7. Save | *File → Save session…* (Ctrl+S) or *Quick save* | Writes a session folder (below). *File → Open session…* restores settings, peaks, calibration and processed traces; *Load selection* reloads the raw data. |
 
+## P04 .nxs files
+
+A data folder with `*.nxs` files (and no `*.h5`) is opened with ToFPipeline's `NXSLoader` (wrapped in
+`polstudio/loaders.py`, settings from the `NXSLoader` config section). One file is one run (`*_<run>.nxs`), every scan
+point holds one histogram per channel (`histogram_ch01` … `ch15` = ToF 0 … 14). In the pipeline layout trainId = run
+number and pulseId = scan point, so the train slice in the Data dock selects scan points, `stackTrains` averages runs
+(set `trainStackSize` = 1 to keep runs apart) and `stackPulses` averages scan points. There is no pulse split and no
+GMD; the Inspect tab shows the summed histogram of a run and its scan points. The photon energy is the
+monochromator energy (`scan/instrument/mono/energy`), the sample rate follows from the histogram bin size.
+
 ## Update button
 
 *Update → <tab>* (next to *Load selection*) runs the pipeline for the current selection up to the selected

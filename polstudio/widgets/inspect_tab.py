@@ -1,4 +1,5 @@
-"""Inspect raw train traces, tune the pulse split and look at the per-pulse GMD energy."""
+"""Inspect raw train traces, tune the pulse split and look at the per-pulse GMD energy.
+For .nxs files (no pulse split) a "train" is a run and its pulses are the scan points."""
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
@@ -18,6 +19,7 @@ class InspectTab(QWidget):
         super().__init__(parent)
         self.session = session
         self._trace = None
+        self._pulses = None     # .nxs: scan points of the current run after the loader's preprocessing
         self._regions = []
 
         layout = QHBoxLayout(self)
@@ -25,6 +27,7 @@ class InspectTab(QWidget):
         layout.addLayout(side, stretch=0)
 
         nav = QGroupBox("Train")
+        self.navBox = nav
         navLayout = QFormLayout(nav)
         self.trainSlider = QSlider(Qt.Orientation.Horizontal)
         self.trainSpin = QSpinBox()
@@ -41,6 +44,7 @@ class InspectTab(QWidget):
         side.addWidget(nav)
 
         split = QGroupBox("Pulse split")
+        self.splitBox = split
         splitLayout = QFormLayout(split)
         self.offsetSpin = QDoubleSpinBox(decimals=2, maximum=1e6, singleStep=1.0)
         self.periodSpin = QDoubleSpinBox(decimals=3, maximum=1e6, singleStep=0.1)
@@ -81,8 +85,21 @@ class InspectTab(QWidget):
         self.view.ci.layout.setRowStretchFactor(1, 3)
         self.view.ci.layout.setRowStretchFactor(2, 1)
         self._updateStartsLabel()
+        self.updateFormat()
 
     # ------------------------------------------------------------------
+    def updateFormat(self):
+        """Show the pulse split for FLASH HDF5 data only."""
+        split = self.session.splitsPulses
+        self.splitBox.setVisible(split)
+        self.navBox.setTitle("Train" if split else "Run")
+        self.trainPlot.setTitle("Raw train trace (ADC counts)" if split
+                                else "Raw histogram (counts, sum of the scan points)")
+        self.overlayPlot.setTitle("Pulse windows overlaid (baseline subtracted)" if split
+                                  else "Scan points (after the loader's baseline subtraction and sample shift)")
+        self.overlayPlot.setLabel("bottom", "sample within pulse window" if split else "sample")
+        self.gmdPlot.setTitle("GMD pulse energy" if split else "GMD pulse energy (not in .nxs files)")
+
     def loadSplitSettings(self, cfg):
         for spin in (self.offsetSpin, self.periodSpin, self.nPulsesSpin, self.windowSpin):
             spin.blockSignals(True)
@@ -106,9 +123,11 @@ class InspectTab(QWidget):
                 "nPulses": self.nPulsesSpin.value(), "pulseWindow": self.windowSpin.value() or None}
 
     def applySettingsToConfig(self):
-        self.session.loaderConfig.update(self.splitSettings())
+        if self.session.splitsPulses:
+            self.session.loaderConfig.update(self.splitSettings())
 
     def onDataLoaded(self):
+        self.updateFormat()
         tids = self.session.trainIds()
         self.trainSpin.setMaximum(max(len(tids) - 1, 0))
         self._updateWindowMaximum()
@@ -134,8 +153,10 @@ class InspectTab(QWidget):
         tid = self.currentTrainId()
         if tid is None:
             return
-        self.trainLabel.setText(f"{tid}  (run {self.session.runOfTrain(tid)})")
+        split = self.session.splitsPulses
+        self.trainLabel.setText(f"{tid}  (run {self.session.runOfTrain(tid)})" if split else f"{tid}")
         self._trace = self.session.trainTrace(tid)
+        self._pulses = None if split else self.session.pulsesOfTrain(tid)
         self.redraw()
         self.trainChanged.emit(tid)
 
@@ -190,6 +211,8 @@ class InspectTab(QWidget):
         else:
             y = trace.sel(detector=det).values.astype(float)
         self.trainPlot.plot(x, y, pen=pg.mkPen(TOL["blue"], width=1))
+        if self._pulses is not None:
+            return self._drawPoints(det)
 
         starts, valid, window = self._starts()
         for k, (s, v) in enumerate(zip(starts, valid)):
@@ -217,3 +240,16 @@ class InspectTab(QWidget):
             bars = pg.BarGraphItem(x=gmd["pulseId"].values, height=np.nan_to_num(gmd["Pulse Energy"].values),
                                    width=0.7, brush=TOL["green"])
             self.gmdPlot.addItem(bars)
+
+    def _drawPoints(self, det):
+        pulses = self._pulses
+        if det is None:
+            pulses = pulses.sum(dim="detector")
+        elif det in pulses["detector"].values:
+            pulses = pulses.sel(detector=det)
+        else:
+            return
+        x = pulses["sample"].values
+        for k, pid in enumerate(pulses["pulseId"].values):
+            self.overlayPlot.plot(x, pulses.isel(pulse=k).values, pen=pg.mkPen(CYCLE[k % len(CYCLE)], width=1),
+                                  name=f"point {pid}")

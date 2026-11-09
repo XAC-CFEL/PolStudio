@@ -21,8 +21,9 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from ToFPipeline import FlashH5Loader, saveCalibration
+from ToFPipeline import saveCalibration
 
+from .loaders import runNumber
 from .session import SESSION_KEY, _gitCommit, _jsonable
 from . import ROOT
 
@@ -91,7 +92,7 @@ class ResultsTable:
         params, errors, settings = pol["params"], pol["errors"], pol["settings"]
         peakNo = settings.get("peakNo", s["polarization"].get("peakNo", 0))
         used = results[results["peakNo"] == peakNo] if results is not None else pd.DataFrame()
-        runs = sorted({FlashH5Loader.runNumber(f) for f in s["files"]} - {None})
+        runs = sorted({runNumber(f) for f in s["files"]} - {None})
         tids = session.trainIds() if session.loader is not None else np.array([])
         row = {
             "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
