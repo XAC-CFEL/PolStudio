@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QCheckBox, QGroupBox, QHBoxLayout, QLabel, QPushBut
 
 from ToFPipeline import Plotter
 
+from ..session import traceLabel
 from .pandas_model import PandasModel, makeTableView
 from .params import ParamForm
 
@@ -183,12 +184,13 @@ class PolarizationTab(QWidget):
             if ax is not self.polAx:
                 self.figure.delaxes(ax)
         self.heatAx = self.figure.add_subplot(1, 2, 2, projection="polar")
-        tid, pid = data["pulse"].to_index()[min(self.pulseSpin.value(), data.sizes["pulse"] - 1)]
+        i = min(self.pulseSpin.value(), data.sizes["pulse"] - 1)
+        tid, pid = data["pulse"].to_index()[i]
         angles = self.session.loader.angles
         cfg = {"ToF": [int(d) for d in angles["detector"]], "angles": [float(a) for a in angles["Angles"]]}
         trans = self.session.transmissionCalib
         Plotter(data, results=self.session.results, config=cfg).plot(
             trainId=tid, pulseId=pid, ax=self.heatAx, savename=False, show=False,
             transParam=trans if trans is not None and len(trans) else None,
-            title=f"trainId {tid} / pulse {pid}")
+            title=traceLabel(data, i, "trainId {tid} / pulse {pid}"))
         self.canvas.draw_idle()

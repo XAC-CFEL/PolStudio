@@ -237,7 +237,8 @@ class MainWindow(QMainWindow):
             self.inspectTab.applySettingsToConfig()
             return
         self.inspectTab.applySettingsToConfig()
-        self.runTask(self.session.refreshPulseSplit, lambda _: self.onDataLoaded(), "Re-cutting pulses")
+        self.runTask(self.session.refreshPulseSplit, lambda _: self.onDataLoaded(),
+                     "Reloading with the new pulse split / baseline")
 
     def onDataLoaded(self):
         s = self.session
@@ -447,6 +448,7 @@ class MainWindow(QMainWindow):
         self.inspectTab._updateStartsLabel()
         self.inspectTab.updateFormat()
         self.dataPanel.workersSpin.setValue(int(session.state.get("workers") or 0))
+        self.dataPanel.separateRunsCheck.setChecked(bool(session.state.get("separateRuns")))
         for key, edit in self.dataPanel.trainEdits.items():
             value = session.state.get(key)
             edit.setText("" if value is None else str(value))

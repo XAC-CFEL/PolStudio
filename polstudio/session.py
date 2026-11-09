@@ -88,8 +88,45 @@ def _jsonable(obj):
     return obj
 
 
-def runStepChain(data, steps, peakConfig=None, pulseEnergy=None, log=print):
-    """Apply the enabled preprocessing steps in order. Returns the PeakFinder."""
+def forEachRun(data, fn, separateRuns=True):
+    """
+    fn(data) -> DataArray. With separateRuns, fn runs on every run (daq_run) on its own, as if it were loaded alone,
+    and the results are concatenated along pulse; they keep a daq_run coordinate so later phases can split again.
+    """
+    if not separateRuns or "daq_run" not in data.coords:
+        return fn(data)
+    runs = data["daq_run"].values
+    parts = []
+    for run in pd.unique(runs):
+        part = fn(data.isel(pulse=np.nonzero(runs == run)[0]))
+        parts.append(part.assign_coords(daq_run=("pulse", np.full(part.sizes["pulse"], run))))
+    return xr.concat(parts, dim="pulse")
+
+
+def runOfTrace(data, i):
+    """Run of trace i of processed data, or None when unknown (e.g. traces stacked over several runs)."""
+    if "daq_run" not in data.coords:
+        return None
+    return int(data["daq_run"].values[i])
+
+
+def traceLabel(data, i, template="{tid} / {pid}"):
+    """trainId / pulseId of trace i, plus its run when known."""
+    tid, pid = data["pulse"].to_index()[i]
+    run = runOfTrace(data, i)
+    return template.format(tid=tid, pid=pid) + (f" (run {run})" if run is not None else "")
+
+
+def runStepChain(data, steps, peakConfig=None, pulseEnergy=None, log=print, separateRuns=False):
+    """Apply the enabled preprocessing steps in order (to each run on its own with separateRuns).
+    Returns the PeakFinder."""
+    if separateRuns:
+        data = forEachRun(data, lambda part: _runSteps(part, steps, peakConfig, pulseEnergy, log).data)
+        return PeakFinder(data, config=peakConfig)
+    return _runSteps(data, steps, peakConfig, pulseEnergy, log)
+
+
+def _runSteps(data, steps, peakConfig, pulseEnergy, log):
     pf = PeakFinder(data, config=peakConfig)
     for step in steps:
         if not step.get("enabled"):
@@ -156,6 +193,7 @@ class AnalysisSession:
                             "setBeta": 2.0, "setPhi": 0.0, "setPlin": 0.0, "intMethod": "height",
                             "file": None},
             "polarization": copy.deepcopy(DEFAULT_POL_PARAMS),
+            "separateRuns": False,       # preprocess every run on its own instead of treating all runs as one
             "workers": 0,                # worker processes per detector; 0 = auto, 1 = no pool
             "resultsTable": {"file": None, "auto": False},   # polarization results table (results_table.py)
         }
@@ -287,8 +325,8 @@ class AnalysisSession:
         return helper.pulseStartIndices(nSamplesTrain)
 
     def pulsesOfTrain(self, trainId):
-        """Pulses of one train after the loader's default preprocessing: DataArray (detector, pulse, sample)."""
-        return self._subsetTrains(self.raw, [trainId]).compute()
+        """Raw scan points of one .nxs run (before baseline subtraction): DataArray (detector, pulse, sample)."""
+        return self._subsetTrains(self.loader.pointTraces, [trainId]).compute()
 
     def gmdOfTrain(self, trainId):
         pe = self.loader.pulseEnergy if self.loader is not None else None
@@ -305,7 +343,8 @@ class AnalysisSession:
         """Apply the enabled preprocessing steps in order (in this process). Returns the PeakFinder."""
         steps = steps if steps is not None else self.state["steps"]
         pulseEnergy = self.loader.pulseEnergy if self.loader is not None else None
-        return runStepChain(data, steps, self.config["PeakFinder"], pulseEnergy, log=log)
+        return runStepChain(data, steps, self.config["PeakFinder"], pulseEnergy, log=log,
+                            separateRuns=self.state["separateRuns"])
 
     def preview(self, trainIds, steps=None, log=print):
         """Run the step chain on a few trains only. Returns (rawSubset, processedSubset) in memory."""
@@ -385,7 +424,8 @@ class AnalysisSession:
 
     def _processedSignature(self):
         steps = [{"name": st["name"], "params": st.get("params", {})} for st in self.state["steps"] if st.get("enabled")]
-        return self._rawSignature() + json.dumps(_jsonable(steps), sort_keys=True, default=str)
+        return (self._rawSignature() + json.dumps(_jsonable(steps), sort_keys=True, default=str)
+                + f"|separateRuns={bool(self.state['separateRuns'])}")
 
     def _resultsSignature(self):
         return (self._processedSignature() + f"|v{self.processedVersion}|"
@@ -436,7 +476,7 @@ class AnalysisSession:
         # processed traces
         if self.processed is not None and self.productSig.get("processed") != self._processedSignature():
             self.processed = None
-            actions.append("processed data outdated (other data or steps)")
+            actions.append("processed data outdated (other data, steps or run mode)")
         if self.processed is not None:
             have = [int(d) for d in self.processed["detector"].values]
             removed = [d for d in have if d not in dets]
@@ -726,6 +766,8 @@ class AnalysisSession:
             f.create_dataset("trainId", data=index.get_level_values("trainId").values)
             f.create_dataset("pulseId", data=index.get_level_values("pulseId").values)
             f.create_dataset("sample", data=data["sample"].values)
+            if "daq_run" in data.coords:
+                f.create_dataset("daq_run", data=data["daq_run"].values)
 
     @staticmethod
     def loadProcessed(path):
@@ -734,7 +776,9 @@ class AnalysisSession:
             idx = pd.MultiIndex.from_arrays([f["trainId"][:], f["pulseId"][:]], names=["trainId", "pulseId"])
             da_ = xr.DataArray(f["data"][:], dims=["detector", "pulse", "sample"],
                                coords={"detector": f["detector"][:], "sample": f["sample"][:]})
-        return da_.assign_coords(xr.Coordinates.from_pandas_multiindex(idx, "pulse"))
+            runs = f["daq_run"][:] if "daq_run" in f else None
+        da_ = da_.assign_coords(xr.Coordinates.from_pandas_multiindex(idx, "pulse"))
+        return da_ if runs is None else da_.assign_coords(daq_run=("pulse", runs))
 
     @classmethod
     def open(cls, folder):

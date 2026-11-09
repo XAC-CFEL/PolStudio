@@ -1,4 +1,4 @@
-"""Inspect raw train traces, tune the pulse split and look at the per-pulse GMD energy.
+"""Inspect raw train traces, tune the pulse split and baseline region and look at the per-pulse GMD energy.
 For .nxs files (no pulse split) a "train" is a run and its pulses are the scan points."""
 import numpy as np
 import pyqtgraph as pg
@@ -19,7 +19,7 @@ class InspectTab(QWidget):
         super().__init__(parent)
         self.session = session
         self._trace = None
-        self._pulses = None     # .nxs: scan points of the current run after the loader's preprocessing
+        self._pulses = None     # .nxs: raw scan points of the current run
         self._regions = []
 
         layout = QHBoxLayout(self)
@@ -53,7 +53,6 @@ class InspectTab(QWidget):
         self.windowSpin = QSpinBox(minimum=0, maximum=1_000_000)
         self.windowSpin.setSpecialValueText("full period")
         self.windowSpin.setToolTip("Samples kept from each pulse start; the rest of the period is discarded")
-        self.loadSplitSettings(self.session.loaderConfig)
         for label, spin in (("first pulse offset", self.offsetSpin), ("period (samples)", self.periodSpin),
                             ("number of pulses", self.nPulsesSpin), ("window (samples)", self.windowSpin)):
             splitLayout.addRow(label, spin)
@@ -68,6 +67,25 @@ class InspectTab(QWidget):
         self.recutButton.clicked.connect(self.recutRequested)
         splitLayout.addRow(self.recutButton)
         side.addWidget(split)
+
+        baseline = QGroupBox("Baseline (subtracted when loading)")
+        baselineLayout = QFormLayout(baseline)
+        self.baselineStartSpin = QSpinBox(minimum=0, maximum=1_000_000)
+        # 0 = up to the end of the trace (an empty region is never useful)
+        self.baselineStopSpin = QSpinBox(minimum=0, maximum=1_000_000)
+        self.baselineStopSpin.setSpecialValueText("end")
+        for label, spin in (("start (sample)", self.baselineStartSpin), ("stop (sample)", self.baselineStopSpin)):
+            spin.setToolTip("The mean of samples [start, stop) of each pulse window (.h5) or histogram (.nxs) is "
+                            "subtracted from every trace. Shown as the grey band in the overlay, drag it there.")
+            baselineLayout.addRow(label, spin)
+            spin.valueChanged.connect(self._baselineChanged)
+        self.baselineButton = QPushButton("Apply baseline (reload)")
+        self.baselineButton.setToolTip("Reloads the selection with this baseline region. "
+                                       "Preprocessing and peaks have to be redone afterwards.")
+        self.baselineButton.clicked.connect(self.recutRequested)
+        baselineLayout.addRow(self.baselineButton)
+        side.addWidget(baseline)
+        self.loadSplitSettings(self.session.loaderConfig)
         side.addStretch(1)
 
         self.view = pg.GraphicsLayoutWidget()
@@ -89,26 +107,37 @@ class InspectTab(QWidget):
 
     # ------------------------------------------------------------------
     def updateFormat(self):
-        """Show the pulse split for FLASH HDF5 data only."""
+        """Show the pulse split for FLASH HDF5 data only; another format brings its own loader settings."""
+        fmt = self.session.state["dataFormat"]
+        if fmt != getattr(self, "_format", fmt):
+            self.loadSplitSettings(self.session.loaderConfig)
+            self._updateStartsLabel()
+        self._format = fmt
         split = self.session.splitsPulses
         self.splitBox.setVisible(split)
         self.navBox.setTitle("Train" if split else "Run")
         self.trainPlot.setTitle("Raw train trace (ADC counts)" if split
                                 else "Raw histogram (counts, sum of the scan points)")
         self.overlayPlot.setTitle("Pulse windows overlaid (baseline subtracted)" if split
-                                  else "Scan points (after the loader's baseline subtraction and sample shift)")
+                                  else "Scan points overlaid (baseline subtracted)")
         self.overlayPlot.setLabel("bottom", "sample within pulse window" if split else "sample")
         self.gmdPlot.setTitle("GMD pulse energy" if split else "GMD pulse energy (not in .nxs files)")
 
     def loadSplitSettings(self, cfg):
-        for spin in (self.offsetSpin, self.periodSpin, self.nPulsesSpin, self.windowSpin):
+        """Pulse split and baseline region from the loader config."""
+        spins = (self.offsetSpin, self.periodSpin, self.nPulsesSpin, self.windowSpin,
+                 self.baselineStartSpin, self.baselineStopSpin)
+        for spin in spins:
             spin.blockSignals(True)
         self.offsetSpin.setValue(float(cfg.get("pulseOffset", 0.0)))
         self.periodSpin.setValue(float(cfg.get("pulsePeriod", 1000.0)))
         self.nPulsesSpin.setValue(int(cfg.get("nPulses", 1)))
         self._updateWindowMaximum()
         self.windowSpin.setValue(int(cfg.get("pulseWindow") or 0))
-        for spin in (self.offsetSpin, self.periodSpin, self.nPulsesSpin, self.windowSpin):
+        start, stop = (list(cfg.get("baselineRegion") or [0, 10]) + [None])[:2]
+        self.baselineStartSpin.setValue(int(start or 0))
+        self.baselineStopSpin.setValue(int(stop or 0))
+        for spin in spins:
             spin.blockSignals(False)
 
     def _nSamplesTrain(self):
@@ -122,9 +151,13 @@ class InspectTab(QWidget):
         return {"pulseOffset": self.offsetSpin.value(), "pulsePeriod": self.periodSpin.value(),
                 "nPulses": self.nPulsesSpin.value(), "pulseWindow": self.windowSpin.value() or None}
 
+    def baselineRegion(self):
+        return [self.baselineStartSpin.value(), self.baselineStopSpin.value() or None]
+
     def applySettingsToConfig(self):
         if self.session.splitsPulses:
             self.session.loaderConfig.update(self.splitSettings())
+        self.session.loaderConfig["baselineRegion"] = self.baselineRegion()
 
     def onDataLoaded(self):
         self.updateFormat()
@@ -164,6 +197,41 @@ class InspectTab(QWidget):
         self._updateWindowMaximum()
         self._updateStartsLabel()
         self.redraw()
+
+    def _baselineChanged(self, *args):
+        start, stop = self.baselineRegion()
+        if stop is not None and stop <= start:
+            self.baselineStopSpin.blockSignals(True)
+            self.baselineStopSpin.setValue(start + 1)
+            self.baselineStopSpin.blockSignals(False)
+        self.redraw()
+
+    def _baselineDragged(self, x0, nSamples, region):
+        lo, hi = (int(round(v - x0)) for v in region.getRegion())
+        lo = min(max(lo, 0), nSamples - 1)
+        for spin in (self.baselineStartSpin, self.baselineStopSpin):
+            spin.blockSignals(True)
+        self.baselineStartSpin.setValue(lo)
+        self.baselineStopSpin.setValue(0 if hi >= nSamples else max(hi, lo + 1))
+        for spin in (self.baselineStartSpin, self.baselineStopSpin):
+            spin.blockSignals(False)
+        # Rebuild the band after the drag signal has returned
+        QTimer.singleShot(0, self.redraw)
+
+    def _subtractBaseline(self, traces):
+        """Subtract the mean of the baseline region along the last axis, as the loaders do."""
+        start, stop = self.baselineRegion()
+        traces = np.asarray(traces, dtype=float)
+        with np.errstate(invalid="ignore"):
+            return traces - np.nanmean(traces[..., start:stop], axis=-1, keepdims=True)
+
+    def _drawBaselineBand(self, x0, nSamples):
+        start, stop = self.baselineRegion()
+        stop = nSamples if stop is None else min(stop, nSamples)
+        band = pg.LinearRegionItem(values=(x0 + start, x0 + stop), brush=pg.mkBrush(128, 128, 128, 60))
+        band.setToolTip("Baseline region: drag to move, drag an edge to resize")
+        band.sigRegionChangeFinished.connect(lambda r: self._baselineDragged(x0, nSamples, r))
+        self.overlayPlot.addItem(band)
 
     def _starts(self):
         s = self.splitSettings()
@@ -227,13 +295,14 @@ class InspectTab(QWidget):
             label.setPos(s, float(np.nanmax(y)))
             self.trainPlot.addItem(label)
 
-        base = np.median(y[:200])
         for k, (s, v) in enumerate(zip(starts, valid)):
             if not v:
                 continue
-            seg = y[s:s + window] - base
+            seg = self._subtractBaseline(y[s:s + window])
             self.overlayPlot.plot(np.arange(len(seg)), seg, pen=pg.mkPen(CYCLE[k % len(CYCLE)], width=1),
                                   name=f"pulse {k}")
+        if valid.any():
+            self._drawBaselineBand(0, window)
 
         gmd = self.session.gmdOfTrain(self.currentTrainId())
         if gmd is not None and len(gmd):
@@ -250,6 +319,7 @@ class InspectTab(QWidget):
         else:
             return
         x = pulses["sample"].values
+        values = self._subtractBaseline(pulses.values)
         for k, pid in enumerate(pulses["pulseId"].values):
-            self.overlayPlot.plot(x, pulses.isel(pulse=k).values, pen=pg.mkPen(CYCLE[k % len(CYCLE)], width=1),
-                                  name=f"point {pid}")
+            self.overlayPlot.plot(x, values[k], pen=pg.mkPen(CYCLE[k % len(CYCLE)], width=1), name=f"point {pid}")
+        self._drawBaselineBand(int(x[0]), len(x))

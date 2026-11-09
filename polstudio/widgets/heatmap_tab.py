@@ -15,6 +15,7 @@ from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QSpinBox,
                              QStackedWidget, QVBoxLayout, QWidget)
 
+from ..session import traceLabel
 from .plot_grid import TOL
 
 COLORMAPS = ["viridis", "inferno", "plasma", "magma", "cividis", "turbo"]
@@ -403,7 +404,7 @@ class HeatmapTab(QWidget):
         else:
             i = min(self.pulseSpin.value(), data.sizes["pulse"] - 1)
             tid, pid = data["pulse"].to_index()[i]
-            self.pulseLabel.setText(f"{tid} / {pid}")
+            self.pulseLabel.setText(traceLabel(data, i))
             traces = window.isel(pulse=i).values
             peaks = self._peaks(tid, pid, detectors) if self.peaksCheck.isChecked() else []
         traces = np.nan_to_num(np.asarray(traces, dtype=float))

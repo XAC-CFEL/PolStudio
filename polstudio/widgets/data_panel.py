@@ -61,6 +61,16 @@ class DataPanel(QWidget):
         self.tree.itemChanged.connect(self._itemChanged)
         layout.addWidget(self.tree, stretch=1)
 
+        self.separateRunsCheck = QCheckBox("Process selected runs separately")
+        self.separateRunsCheck.setToolTip(
+            "On: every run goes through the preprocessing on its own, as if it were loaded alone – stacking and\n"
+            "normalisation never mix runs and every run keeps its own traces and photon energy (e.g. for an energy\n"
+            "calibration). Step through the runs with the pulse index in the other tabs.\n"
+            "Off: all selected runs are treated as one run.")
+        self.separateRunsCheck.setChecked(bool(self.session.state.get("separateRuns")))
+        self.separateRunsCheck.toggled.connect(lambda v: self.session.state.__setitem__("separateRuns", v))
+        layout.addWidget(self.separateRunsCheck)
+
         trains = QGroupBox(SLICE_TITLES[self.session.state["dataFormat"]])
         self.trainsBox = trains
         grid = QGridLayout(trains)

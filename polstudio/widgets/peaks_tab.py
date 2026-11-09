@@ -5,7 +5,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
                              QSpinBox, QSplitter, QVBoxLayout, QWidget)
 
-from ..session import DEFAULT_PEAK_PARAMS, PEAK_TOGGLES
+from ..session import DEFAULT_PEAK_PARAMS, PEAK_TOGGLES, traceLabel
 from .pandas_model import PandasModel, makeTableView
 from .params import ParamForm
 from .plot_grid import TOL, PlotGrid
@@ -155,7 +155,7 @@ class PeaksTab(QWidget):
         self._updateAxes()
         i = min(self.pulseSpin.value(), data.sizes["pulse"] - 1)
         tid, pid = data["pulse"].to_index()[i]
-        self.pulseLabel.setText(f"{tid} / {pid}")
+        self.pulseLabel.setText(traceLabel(data, i))
         x = data["sample"].values
         results = self.session.results
         if results is not None and len(results):

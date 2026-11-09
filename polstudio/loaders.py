@@ -23,7 +23,8 @@ class NxsFileLoader(NXSLoader):
     Keeps NXSLoader's layout and settings (config section ``NXSLoader``): detector = histogram channel − 1,
     trainId = run number, pulseId = scan point, so the positional train slice selects scan points. There is no
     pulse split and no GMD; the photon energy is the monochromator energy stored in the file. ``trainTraces``
-    holds the raw histograms summed over the selected scan points (one "train" per run).
+    holds the raw histograms summed over the selected scan points (one "train" per run), ``pointTraces`` the raw
+    histograms of every scan point (``data`` before ``defaultPreprocessing``).
     """
     CONFIG_KEY = "NXSLoader"
     RUN_PATTERN = re.compile(r"_(\d+)\.nxs$")
@@ -37,6 +38,7 @@ class NxsFileLoader(NXSLoader):
         self.files = sorted((Path(f) for f in files), key=lambda f: self.runNumber(f) or 0)
         super().__init__(self.files[0].parent if self.files else ".", config=config)
         self.trainTraces = None
+        self.pointTraces = None
         self.pulseStarts = None    # no pulse split: every scan point is a pulse
         self.pulseEnergy = None    # no GMD
         self.photonEnergy = None
@@ -183,6 +185,7 @@ class NxsFileLoader(NXSLoader):
             name="adc")
         self.data = self.data.assign_coords(xr.Coordinates.from_pandas_multiindex(pulseIndex, "pulse"))
         self.data = self.data.assign_coords(daq_run=("pulse", np.repeat(runs, counts)))
+        self.pointTraces = self.data   # kept unprocessed for the Inspect tab
 
         self.photonEnergy = None
         if key in ("all", "Photon Energy"):

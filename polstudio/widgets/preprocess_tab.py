@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                              QListWidget, QListWidgetItem, QPushButton, QSpinBox, QSplitter, QVBoxLayout, QWidget)
 
-from ..session import STEP_SPECS
+from ..session import STEP_SPECS, traceLabel
 from .params import ParamForm
 from .plot_grid import TOL, PlotGrid
 
@@ -43,13 +43,23 @@ class PreprocessTab(QWidget):
 
         side = QWidget()
         sideLayout = QVBoxLayout(side)
-        sideLayout.addWidget(QLabel("Steps (tick to enable, drag to reorder):"))
+        sideLayout.addWidget(QLabel("Steps (tick to enable, drag to reorder, duplicate to run a step again):"))
         self.stepList = QListWidget()
         self.stepList.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.stepList.currentRowChanged.connect(self._selectStep)
         self.stepList.model().rowsMoved.connect(self._syncStepsFromList)
         self.stepList.itemChanged.connect(self._syncStepsFromList)
         sideLayout.addWidget(self.stepList, stretch=1)
+        stepButtons = QHBoxLayout()
+        self.duplicateButton = QPushButton("Duplicate")
+        self.duplicateButton.setToolTip("Add a copy of the selected step below it, e.g. to smooth twice")
+        self.duplicateButton.clicked.connect(self._duplicateStep)
+        self.removeButton = QPushButton("Remove")
+        self.removeButton.setToolTip("Remove the selected copy (one step of each kind always stays in the list)")
+        self.removeButton.clicked.connect(self._removeStep)
+        stepButtons.addWidget(self.duplicateButton)
+        stepButtons.addWidget(self.removeButton)
+        sideLayout.addLayout(stepButtons)
 
         self.paramBox = QGroupBox("Parameters")
         paramLayout = QVBoxLayout(self.paramBox)
@@ -76,6 +86,10 @@ class PreprocessTab(QWidget):
         self.showRaw.setChecked(True)
         self.showRaw.toggled.connect(self.redraw)
         previewLayout.addRow(self.showRaw)
+        self.baselineLabel = QLabel("")
+        self.baselineLabel.setWordWrap(True)
+        self.baselineLabel.setToolTip("Subtracted by the loader before these steps; change it in the Inspect tab")
+        previewLayout.addRow(self.baselineLabel)
         buttons = QHBoxLayout()
         self.previewButton = QPushButton("Preview")
         self.previewButton.clicked.connect(self._requestPreview)
@@ -100,22 +114,72 @@ class PreprocessTab(QWidget):
         self._processed = None
         self.loadSteps()
 
+    def showEvent(self, event):
+        start, stop = (list(self.session.loaderConfig.get("baselineRegion") or [0, 10]) + [None])[:2]
+        self.baselineLabel.setText(f"Baseline: samples [{start or 0}, {'end' if stop is None else stop}) are "
+                                   "subtracted when loading (set in Inspect)")
+        super().showEvent(event)
+
     # ------------------------------------------------------------------ steps
+    @staticmethod
+    def _makeItem(step):
+        item = QListWidgetItem(STEP_SPECS[step["name"]]["label"])
+        item.setData(Qt.ItemDataRole.UserRole, copy.deepcopy(step))
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
+        item.setCheckState(Qt.CheckState.Checked if step.get("enabled") else Qt.CheckState.Unchecked)
+        return item
+
     def loadSteps(self):
         self.stepList.blockSignals(True)
         self.stepList.clear()
         for step in self.session.state["steps"]:
-            item = QListWidgetItem(STEP_SPECS[step["name"]]["label"])
-            item.setData(Qt.ItemDataRole.UserRole, copy.deepcopy(step))
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled)
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
-            item.setCheckState(Qt.CheckState.Checked if step.get("enabled") else Qt.CheckState.Unchecked)
-            self.stepList.addItem(item)
+            self.stepList.addItem(self._makeItem(step))
+        self._relabel()
         self.stepList.blockSignals(False)
         self.stepList.setCurrentRow(0)
 
+    def _stepNames(self):
+        return [self.stepList.item(i).data(Qt.ItemDataRole.UserRole)["name"] for i in range(self.stepList.count())]
+
+    def _relabel(self):
+        """Number the copies of steps that occur more than once, in list order."""
+        names = self._stepNames()
+        seen = {}
+        blocked = self.stepList.blockSignals(True)
+        for i, name in enumerate(names):
+            seen[name] = seen.get(name, 0) + 1
+            suffix = f" ({seen[name]})" if names.count(name) > 1 else ""
+            self.stepList.item(i).setText(STEP_SPECS[name]["label"] + suffix)
+        self.stepList.blockSignals(blocked)
+
+    def _hasCopies(self, row):
+        names = self._stepNames()
+        return 0 <= row < len(names) and names.count(names[row]) > 1
+
+    def _duplicateStep(self):
+        row = self.stepList.currentRow()
+        if row < 0:
+            return
+        self._storeParams()
+        step = copy.deepcopy(self.stepList.item(row).data(Qt.ItemDataRole.UserRole))
+        step["enabled"] = True
+        self.stepList.insertItem(row + 1, self._makeItem(step))
+        self._syncStepsFromList()
+        self.stepList.setCurrentRow(row + 1)
+
+    def _removeStep(self):
+        row = self.stepList.currentRow()
+        if not self._hasCopies(row):
+            return
+        self._currentRow = -1   # the form still shows the removed step: do not store it anywhere
+        self.stepList.takeItem(row)
+        self._syncStepsFromList()
+        self._selectStep(self.stepList.currentRow())
+
     def _selectStep(self, row):
         self._currentRow = row
+        self.removeButton.setEnabled(self._hasCopies(row))
         if row < 0:
             return
         step = self.stepList.item(row).data(Qt.ItemDataRole.UserRole)
@@ -142,6 +206,8 @@ class PreprocessTab(QWidget):
             step["enabled"] = item.checkState() == Qt.CheckState.Checked
             steps.append(step)
         self.session.state["steps"] = steps
+        self._relabel()
+        self.removeButton.setEnabled(self._hasCopies(self.stepList.currentRow()))
 
     def steps(self):
         self._storeParams()
@@ -169,8 +235,8 @@ class PreprocessTab(QWidget):
         self.pulseCombo.blockSignals(True)
         self.pulseCombo.clear()
         index = processed["pulse"].to_index()
-        for i, (tid, pid) in enumerate(index):
-            self.pulseCombo.addItem(f"trainId {tid} / pulse {pid}", i)
+        for i in range(len(index)):
+            self.pulseCombo.addItem(traceLabel(processed, i, "trainId {tid} / pulse {pid}"), i)
         idx = self.pulseCombo.findData(current)
         self.pulseCombo.setCurrentIndex(idx if idx >= 0 else 0)
         self.pulseCombo.blockSignals(False)

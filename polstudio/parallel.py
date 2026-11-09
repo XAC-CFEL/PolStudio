@@ -57,7 +57,8 @@ def _loadAndPreprocess(job):
                     channels=[det], key="GMD" if job["needsGMD"] else None, photonEnergy={})
         loader.defaultPreprocessing(ToF=[det])
         data = loader.data.compute()
-        pf = runStepChain(data, job["steps"], job["peakConfig"], loader.pulseEnergy)
+        pf = runStepChain(data, job["steps"], job["peakConfig"], loader.pulseEnergy,
+                          separateRuns=job["separateRuns"])
         return pf.data.compute()
     finally:
         loader.close()
@@ -65,7 +66,8 @@ def _loadAndPreprocess(job):
 
 def _stepsOnData(job):
     from .session import runStepChain
-    pf = runStepChain(job["data"], job["steps"], job["peakConfig"], job["pulseEnergy"])
+    pf = runStepChain(job["data"], job["steps"], job["peakConfig"], job["pulseEnergy"],
+                      separateRuns=job["separateRuns"])
     return pf.data.compute()
 
 
@@ -117,7 +119,9 @@ def splitPhases(steps):
 def preprocess(session, executor, steps, log=print, detectors=None):
     """Parallel equivalent of runStepChain(session.raw.sel(detector=detectors), steps).data.compute()."""
     from ToFPipeline import PeakFinder
+    from .session import forEachRun
     s = session.state
+    separateRuns = bool(s["separateRuns"])
     detectors = [int(d) for d in (detectors if detectors is not None else session.raw["detector"].values)]
     phases = splitPhases(steps)
     peakConfig = dict(session.config["PeakFinder"])
@@ -125,17 +129,22 @@ def preprocess(session, executor, steps, log=print, detectors=None):
     jobs = [{"detector": det, "files": s["files"], "format": s["dataFormat"],
              "loaderConfig": dict(session.loaderConfig),
              "trainStart": s["trainStart"], "trainStop": s["trainStop"], "trainStep": s["trainStep"],
-             "steps": phases[0][1], "peakConfig": peakConfig, "needsGMD": needsGMD} for det in detectors]
+             "steps": phases[0][1], "peakConfig": peakConfig, "needsGMD": needsGMD, "separateRuns": separateRuns}
+            for det in detectors]
     parts = _runJobs(executor, workerLoadAndPreprocess, jobs, "preprocessing", log)
     data = xr.concat(parts, dim="detector")
 
+    def applyGlobal(part, step):
+        pf = PeakFinder(part, config=peakConfig)
+        getattr(pf, step["name"])(**dict(step.get("params", {})))
+        return pf.data.compute()
+
     for globalStep, segment in phases[1:]:
-        pf = PeakFinder(data, config=peakConfig)
-        getattr(pf, globalStep["name"])(**dict(globalStep.get("params", {})))
-        data = pf.data.compute()
+        data = forEachRun(data, lambda part: applyGlobal(part, globalStep), separateRuns)
         if segment:
             jobs = [{"detector": det, "data": data.sel(detector=[det]), "steps": segment, "peakConfig": peakConfig,
-                     "pulseEnergy": session.loader.pulseEnergy if session.loader is not None else None}
+                     "pulseEnergy": session.loader.pulseEnergy if session.loader is not None else None,
+                     "separateRuns": separateRuns}
                     for det in detectors]
             data = xr.concat(_runJobs(executor, workerStepsOnData, jobs, "preprocessing", log), dim="detector")
     return data
