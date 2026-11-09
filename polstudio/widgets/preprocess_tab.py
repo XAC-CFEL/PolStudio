@@ -4,10 +4,11 @@ import copy
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                              QListWidget, QListWidgetItem, QPushButton, QSpinBox, QSplitter, QVBoxLayout, QWidget)
 
-from ..session import STEP_SPECS, traceLabel
+from ..session import STEP_SPECS
+from .navigator import DetectorSelector, TraceNavigator, traceTable
 from .params import ParamForm
 from .plot_grid import TOL, PlotGrid
 
@@ -79,9 +80,12 @@ class PreprocessTab(QWidget):
         previewLayout.addRow("trains", self.nTrainsSpin)
         self.startLabel = QLabel("–")
         previewLayout.addRow("first trainId", self.startLabel)
-        self.pulseCombo = QComboBox()
-        self.pulseCombo.currentIndexChanged.connect(self.redraw)
-        previewLayout.addRow("show pulse", self.pulseCombo)
+        self.navigator = TraceNavigator()
+        self.navigator.changed.connect(self.redraw)
+        previewLayout.addRow(self.navigator)
+        self.detectorSelector = DetectorSelector()
+        self.detectorSelector.changed.connect(self.redraw)
+        previewLayout.addRow("detector", self.detectorSelector)
         self.showRaw = QCheckBox("overlay raw pulse (same trainId / pulseId, rescaled)")
         self.showRaw.setChecked(True)
         self.showRaw.toggled.connect(self.redraw)
@@ -231,15 +235,8 @@ class PreprocessTab(QWidget):
 
     def showPreview(self, raw, processed):
         self._raw, self._processed = raw, processed
-        current = self.pulseCombo.currentData()
-        self.pulseCombo.blockSignals(True)
-        self.pulseCombo.clear()
-        index = processed["pulse"].to_index()
-        for i in range(len(index)):
-            self.pulseCombo.addItem(traceLabel(processed, i, "trainId {tid} / pulse {pid}"), i)
-        idx = self.pulseCombo.findData(current)
-        self.pulseCombo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.pulseCombo.blockSignals(False)
+        self.navigator.setTraces(traceTable(processed))
+        self.detectorSelector.setDetectors(processed["detector"].values)
         text = f"raw {dict(raw.sizes)} → processed {dict(processed.sizes)}"
         if processed.sizes["pulse"] and raw.sizes["pulse"] > processed.sizes["pulse"]:
             text += f"<br>each processed trace averages ≈ {raw.sizes['pulse'] / processed.sizes['pulse']:.3g} raw pulses"
@@ -247,12 +244,12 @@ class PreprocessTab(QWidget):
         self.redraw()
 
     def redraw(self):
-        if self._processed is None:
+        if self._processed is None or self.navigator.position() is None:
             return
         processed, raw = self._processed, self._raw
-        self.grid.setDetectors(processed["detector"].values)
+        self.grid.setDetectors(self.detectorSelector.select(processed["detector"].values))
         self.grid.clear()
-        i = self.pulseCombo.currentData() or 0
+        i = self.navigator.position()
         tid, pid = processed["pulse"].to_index()[i]
         x = processed["sample"].values
         for det, plot in self.grid.plots.items():
@@ -278,6 +275,7 @@ class PreprocessTab(QWidget):
         keep = [d for d in self._processed["detector"].values if d in set(detectors)]
         self._processed = self._processed.sel(detector=keep)
         self._raw = self._raw.sel(detector=[d for d in self._raw["detector"].values if d in set(detectors)])
+        self.detectorSelector.setDetectors(keep)
         self.redraw()
 
     def setProcessedInfo(self, text):

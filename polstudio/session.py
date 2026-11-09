@@ -103,20 +103,6 @@ def forEachRun(data, fn, separateRuns=True):
     return xr.concat(parts, dim="pulse")
 
 
-def runOfTrace(data, i):
-    """Run of trace i of processed data, or None when unknown (e.g. traces stacked over several runs)."""
-    if "daq_run" not in data.coords:
-        return None
-    return int(data["daq_run"].values[i])
-
-
-def traceLabel(data, i, template="{tid} / {pid}"):
-    """trainId / pulseId of trace i, plus its run when known."""
-    tid, pid = data["pulse"].to_index()[i]
-    run = runOfTrace(data, i)
-    return template.format(tid=tid, pid=pid) + (f" (run {run})" if run is not None else "")
-
-
 def runStepChain(data, steps, peakConfig=None, pulseEnergy=None, log=print, separateRuns=False):
     """Apply the enabled preprocessing steps in order (to each run on its own with separateRuns).
     Returns the PeakFinder."""
@@ -212,6 +198,8 @@ class AnalysisSession:
         self.transmissionCalib = None
         self.calibrationMeta = {}
         self.polarization = None   # dict with params / errors
+        self.runPolarization = None        # fitPolarizationPerRun: DataFrame, one row per run
+        self.runPolarizationInputs = None
         self.calibrateObj = None
         # What each product was made from, so update() only recomputes what changed (see update)
         self.productSig = {}
@@ -560,14 +548,32 @@ class AnalysisSession:
             return results
         results = results.drop(columns=[c for c in ("Angles", "daq_run", "Photon Energy") if c in results])
         results = results.merge(self.loader.angles, on="detector", how="left")
-        pe = self.loader.photonEnergy
+        pe = self._photonEnergyTable()
         if pe is not None:
-            pe = pe.copy()
-            for run, energy in self.state["photonEnergy"].items():
-                pe.loc[pe["daq_run"] == int(run), "Photon Energy"] = float(energy)
             # Stacked results carry the first trainId of each block, which is in this table
             results = results.merge(pe, on="trainId", how="left")
         return results
+
+    def _photonEnergyTable(self):
+        """Loader's trainId / daq_run / Photon Energy table with the overrides applied, or None."""
+        pe = self.loader.photonEnergy if self.loader is not None else None
+        if pe is None:
+            return None
+        pe = pe.copy()
+        for run, energy in self.state["photonEnergy"].items():
+            pe.loc[pe["daq_run"] == int(run), "Photon Energy"] = float(energy)
+        return pe
+
+    def photonEnergyOfTrain(self, trainId=None):
+        """Photon energy (eV) of a train (None: median over all) from the peak results or the loader, or None."""
+        for table in (self.results, self._photonEnergyTable()):
+            if table is None or not len(table) or "Photon Energy" not in table:
+                continue
+            rows = table if trainId is None else table[table["trainId"] == trainId]
+            values = rows["Photon Energy"].dropna()
+            if len(values):
+                return float(values.median())
+        return None
 
     def setPhotonEnergies(self, mapping):
         """{run: eV} overrides; updates the current results in place."""
@@ -665,6 +671,28 @@ class AnalysisSession:
                 warnings.append(f"{key}: calibration {value} vs current {current[key]}")
         return warnings
 
+    def transmissionFactors(self, detectors, photonEnergy=None):
+        """
+        Transmission coefficient per detector (NaN where the calibration has none). With several calibration sets
+        the one whose electron energy is closest to photonEnergy − Ebind is used (the first without photonEnergy).
+        Returns (factors, electron energy of the set) or (None, None) without a transmission calibration.
+        """
+        trans = self.transmissionCalib
+        if trans is None or not len(trans):
+            return None, None
+        electronEnergy = None
+        if "Electron Energy" in trans:
+            energies = trans["Electron Energy"].dropna().unique()
+            if len(energies):
+                electronEnergy = energies[0]
+                if len(energies) > 1 and photonEnergy is not None and np.isfinite(photonEnergy):
+                    target = photonEnergy - float(self.state["polarization"].get("Ebind") or 0.0)
+                    electronEnergy = energies[np.argmin(np.abs(energies - target))]
+                trans = trans[trans["Electron Energy"] == electronEnergy]
+        coefficients = trans.groupby("detector")["Transmission Coefficient"].mean()
+        factors = np.array([coefficients.get(int(d), np.nan) for d in detectors], dtype=float)
+        return factors, None if electronEnergy is None else float(electronEnergy)
+
     def energyOf(self, detector, samples):
         """Map sample positions to energy (eV) with the energy calibration, or None."""
         if self.energyCalib is None or len(self.energyCalib) == 0:
@@ -681,23 +709,56 @@ class AnalysisSession:
         params = dict(params or self.state["polarization"])
         self.state["polarization"] = dict(params)
         self._requireResults()
+        self.polarization = self._fitPolarization(self.results, params, ax=ax)
+        self.polarizationInputs = self._polarizationSignature()
+        return self.polarization
+
+    def _fitPolarization(self, results, params, ax=None):
+        """Fitter.pol on results; returns {"params", "errors", "settings"}."""
+        params = dict(params)
         useTransmission = params.pop("useTransmission", True)
         transParam = self.transmissionCalib if (useTransmission and self.transmissionCalib is not None
                                                 and len(self.transmissionCalib)) else None
-        fitter = Fitter(self.results, config=self.config.get("Fitter"), Ebind=params.pop("Ebind", 0.0))
+        fitter = Fitter(results, config=self.config.get("Fitter"), Ebind=params.pop("Ebind", 0.0))
         # Same orientation as every other polar plot here (0° on the right, counter-clockwise);
         # Fitter.pol defaults to 0° at the top
         plotArgs = {"orientation": "E", "direction": 1}
         fitParams, errors = fitter.pol(transParam=transParam, plot=ax is not None, ax=ax, savename=False,
                                        show=False, **{**plotArgs, **params})
         names = ["Plin", "phi", "scale"] + (["beta2"] if params.get("fitBeta") else [])
-        self.polarizationInputs = self._polarizationSignature()
-        self.polarization = {
+        return {
             "params": {n: float(v) for n, v in zip(names, fitParams)},
             "errors": {n: float(e) for n, e in zip(names, errors)},
             "settings": _jsonable({**params, "useTransmission": useTransmission and transParam is not None}),
         }
-        return self.polarization
+
+    def fitPolarizationPerRun(self, params=None, log=print):
+        """Fit every run of the peak results (daq_run) on its own. Returns a DataFrame with one row per run."""
+        params = dict(params or self.state["polarization"])
+        self.state["polarization"] = dict(params)
+        self._requireResults()
+        if "daq_run" not in self.results or self.results["daq_run"].isna().all():
+            raise ValueError("The peak results carry no run numbers")
+        rows = []
+        for run, group in self.results.groupby("daq_run"):
+            row = {"run": int(run), "photon energy": group["Photon Energy"].median() if "Photon Energy" in group
+                   else np.nan, "nDetectors": group["detector"].nunique(),
+                   "nTraces": group.groupby(["trainId", "pulseId"]).ngroups}
+            try:
+                fit = self._fitPolarization(group, params)
+                for name, value in fit["params"].items():
+                    row[name] = value
+                    row[f"{name} error"] = fit["errors"].get(name)
+            except Exception as e:
+                row["error"] = f"{type(e).__name__}: {e}"
+                log(f"Run {int(run)}: polarization fit failed: {row['error']}")
+            rows.append(row)
+        self.runPolarization = pd.DataFrame(rows)
+        self.runPolarizationInputs = self._polarizationSignature()
+        return self.runPolarization
+
+    def runPolarizationIsCurrent(self):
+        return self.runPolarization is not None and self.runPolarizationInputs == self._polarizationSignature()
 
     def _requireResults(self):
         if self.results is None or len(self.results) == 0:
@@ -749,6 +810,8 @@ class AnalysisSession:
             rows = [{"parameter": k, "value": v, "error": self.polarization["errors"].get(k)}
                     for k, v in self.polarization["params"].items()]
             pd.DataFrame(rows).to_csv(folder / "polarization.csv", index=False)
+        if self.runPolarization is not None:
+            self.runPolarization.to_csv(folder / "polarization_per_run.csv", index=False)
         if processed and self.processed is not None:
             self.saveProcessed(folder / "processed.h5")
         with open(folder / "session.json", "w", encoding="utf-8") as f:
@@ -802,4 +865,7 @@ class AnalysisSession:
             session.productSig["results"] = session._resultsSignature()
         if session.polarization is not None:
             session.polarizationInputs = session._polarizationSignature()
+        if (folder / "polarization_per_run.csv").exists():
+            session.runPolarization = pd.read_csv(folder / "polarization_per_run.csv")
+            session.runPolarizationInputs = session._polarizationSignature()
         return session

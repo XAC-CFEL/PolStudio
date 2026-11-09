@@ -22,13 +22,13 @@ saved session, `--config <config.yaml>` uses another pipeline config (default `T
 
 | Step | Where | What happens |
 |---|---|---|
-| 1. Choose files | **Data** dock → *Open data folder…* | `FlashH5Loader.scan` lists every run (from `run<N>` in the file name) with its files, train count, trainId range, wavelength and start time. Tick runs/files, optionally restrict the trains (positional start/stop/step per file) and the ADC channels, then *Load selection*. **Process selected runs separately** runs the preprocessing on every run on its own, as if it were loaded alone (stacking and normalisation never mix runs, each run keeps its photon energy, e.g. for an energy calibration); the runs then appear one after another under the pulse index of the other tabs, labelled with their run. Off, all selected runs are treated as one run. |
+| 1. Choose files | **Data** dock → *Open data folder…* (*All* / *None* tick every run or channel) | `FlashH5Loader.scan` lists every run (from `run<N>` in the file name) with its files, train count, trainId range, wavelength and start time. Tick runs/files, optionally restrict the trains (positional start/stop/step per file) and the ADC channels, then *Load selection*. **Process selected runs separately** runs the preprocessing on every run on its own, as if it were loaded alone (stacking and normalisation never mix runs, each run keeps its photon energy, e.g. for an energy calibration); the runs then appear one after another under the pulse index of the other tabs, labelled with their run. Off, all selected runs are treated as one run. |
 | 2. Inspect & split pulses | **Inspect** | Step through trains. The raw 16000-sample train trace is shown with the pulse windows shaded; below, all windows of that train are overlaid (aligned peaks = correct period) and the GMD energy per pulse. Pulse starts are `round(offset + k · period)` with a float period. Only the window (default: the full period, capped at `floor(period)` so windows never overlap) is kept; the rest of each period is discarded, which saves memory in proportion. *Apply split* re-cuts all loaded trains. The **Baseline** box sets the region (samples within the pulse window) whose mean the loader subtracts from every trace; the overlay previews it live (grey band, draggable), *Apply baseline* reloads with it. |
 | 3. Preprocess | **Preprocess** | Enable, order (drag), duplicate (e.g. smooth twice with different windows) and parametrise the `PeakFinder` steps: GMD/height filters, periodic-noise and FFT filters, tShift, stacking, smoothing, normalisation. *Preview* runs the chain on N trains starting at the train selected in Inspect (raw in grey, processed in blue). *Apply to all* processes the full selection. |
 | 4. Peaks | **Peaks** | `PeakFinder.process` parameters (ROI and noise region can be dragged on the plots). Traces with peak, FWHM and baseline markers, x axis in samples / ns / eV, the full results table and a position histogram. |
-| 4b. Heatmap | **Heatmap** | Processed traces of one pulse (or the mean of all pulses) as a polar heatmap (angle = detector angle, radius = sample; interpolated between detectors or one wedge per detector) or a Cartesian one (sample vs detector number or angle). Sample range, interpolation, peak overlay, colormap and a colour bar with draggable levels, as in PolScope. |
+| 4b. Heatmap | **Heatmap** | Processed traces of one pulse (or the mean of all pulses) as a polar heatmap (angle = detector angle, radius = sample; interpolated between detectors or one wedge per detector) or a Cartesian one (sample vs detector number or angle). Sample range, interpolation, peak overlay, colormap and a colour bar with draggable levels, as in PolScope; *scale by transmission* multiplies every detector by its transmission coefficient (the calibration set closest to the trace's electron energy). The same panel is shown on the Polarization tab. |
 | 5. Calibration | **Calibration** | Photon energy per run (from the wavelength channel, with overrides), energy calibration (needs ≥ 3 photon energies) and transmission coefficients via `Calibrate`. *Load / Save calibration* reads/writes JSON (default folder `results/calibrations/`). A loaded calibration is checked against the current pulse-split and shift settings. |
-| 6. Polarization | **Polarization** | `Fitter.pol` with optional transmission correction, and the `Plotter` polar intensity map of one pulse. |
+| 6. Polarization | **Polarization** | `Fitter.pol` with optional transmission correction next to the heatmap (same view and settings as the Heatmap tab). *Fit every run* fits each run's peak results on its own and shows P_lin and φ per run (table and plot vs run or photon energy; saved as `polarization_per_run.csv`). |
 | 7. Save | *File → Save session…* (Ctrl+S) or *Quick save* | Writes a session folder (below). *File → Open session…* restores settings, peaks, calibration and processed traces; *Load selection* reloads the raw data. |
 
 ## P04 .nxs files
@@ -40,6 +40,16 @@ number and pulseId = scan point, so the train slice in the Data dock selects sca
 (set `trainStackSize` = 1 to keep runs apart) and `stackPulses` averages scan points. There is no pulse split and no
 GMD; the Inspect tab shows the summed histogram of a run and its scan points. The photon energy is the
 monochromator energy (`scan/instrument/mono/energy`), the sample rate follows from the histogram bin size.
+
+## Navigating traces
+
+Inspect, Preprocess, Peaks and Heatmap step through the traces with one spin box per level: **run**, **trainId**
+and **pulseId**. Each level steps through the values that exist for the levels above it (flip runs, then the trains
+of that run, then its pulses); a level keeps its value when the level above changes, if that value exists there.
+Levels that never change (e.g. the run with only one run loaded, or pulseId after stacking the pulses) are hidden,
+the line below always names the current trace. The run is known for raw traces and for runs processed separately;
+traces stacked over several runs carry none. Peaks and Preprocess also step through the detectors (*all detectors*
+shows the grid, a single detector shows only that one); Inspect does the same for its trace (*sum of all*).
 
 ## Update button
 

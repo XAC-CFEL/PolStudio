@@ -7,7 +7,9 @@ AngularHeatmapCanvas / CartesianHeightCanvas:
 - Cartesian: sample (x) vs detector number or detector angle (y), optionally interpolated between rows.
 
 Options as in PolScope: sample range, interpolate, show peaks (marker + width bar);
-plus colormap, a colour bar with draggable levels and the choice of pulse.
+plus colormap, a colour bar with draggable levels, the choice of run / train / pulse and scaling by the
+transmission calibration. The same panel is shown on the Polarization tab (it moves to the visible tab via
+PanelHost), so both tabs always show the same map with the same settings.
 """
 import numpy as np
 import pyqtgraph as pg
@@ -15,7 +17,7 @@ from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QSpinBox,
                              QStackedWidget, QVBoxLayout, QWidget)
 
-from ..session import traceLabel
+from .navigator import TraceNavigator, traceTable
 from .plot_grid import TOL
 
 COLORMAPS = ["viridis", "inferno", "plasma", "magma", "cividis", "turbo"]
@@ -281,6 +283,20 @@ class CartesianHeatmap(_HeatmapBase):
         self.setPeaks(xs, ys, segX, segY)
 
 
+class PanelHost(QWidget):
+    """Empty container a shared panel can be moved into (a widget has one parent at a time)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+
+    def adopt(self, panel):
+        if panel.parent() is not self:
+            self._layout.addWidget(panel)
+        panel.show()
+
+
 class HeatmapTab(QWidget):
     def __init__(self, session, parent=None):
         super().__init__(parent)
@@ -297,12 +313,16 @@ class HeatmapTab(QWidget):
         side = QVBoxLayout()
         data = QGroupBox("Data")
         dataLayout = QFormLayout(data)
-        self.pulseSpin = QSpinBox()
-        dataLayout.addRow("pulse index", self.pulseSpin)
-        self.pulseLabel = QLabel("–")
-        dataLayout.addRow("trainId / pulseId", self.pulseLabel)
+        self.navigator = TraceNavigator()
+        self.navigator.changed.connect(self.redraw)
+        dataLayout.addRow(self.navigator)
         self.averageCheck = QCheckBox("average over all pulses")
         dataLayout.addRow(self.averageCheck)
+        self.transmissionCheck = QCheckBox("scale by transmission")
+        self.transmissionCheck.setToolTip(
+            "Multiply every detector's trace by its transmission coefficient (Calibration tab). With several "
+            "calibration sets the one closest to the trace's electron energy (photon energy − Ebind) is used.")
+        dataLayout.addRow(self.transmissionCheck)
         side.addWidget(data)
 
         settings = QGroupBox("Heatmap settings")
@@ -343,10 +363,10 @@ class HeatmapTab(QWidget):
         sideWidget.setMaximumWidth(280)
         layout.addWidget(sideWidget)
 
-        for spin in (self.pulseSpin, self.sMinSpin, self.sMaxSpin):
+        for spin in (self.sMinSpin, self.sMaxSpin):
             spin.valueChanged.connect(self.redraw)
-        for check in (self.averageCheck, self.cartesianCheck, self.angleAxisCheck, self.interpolateCheck,
-                      self.peaksCheck, self.autoLevelsCheck):
+        for check in (self.averageCheck, self.transmissionCheck, self.cartesianCheck, self.angleAxisCheck,
+                      self.interpolateCheck, self.peaksCheck, self.autoLevelsCheck):
             check.toggled.connect(self.redraw)
         self.cmapCombo.currentIndexChanged.connect(self.redraw)
         self._nSamples = None
@@ -370,16 +390,16 @@ class HeatmapTab(QWidget):
             self.redraw()
             return
         n = data.sizes["sample"]
-        for spin in (self.pulseSpin, self.sMinSpin, self.sMaxSpin):
+        self.navigator.setTraces(traceTable(data))
+        for spin in (self.sMinSpin, self.sMaxSpin):
             spin.blockSignals(True)
-        self.pulseSpin.setMaximum(max(data.sizes["pulse"] - 1, 0))
         self.sMinSpin.setMaximum(n - 1)
         self.sMaxSpin.setMaximum(n - 1)
         if self._nSamples != n:   # new window length: show the whole window
             self._nSamples = n
             self.sMinSpin.setValue(0)
             self.sMaxSpin.setValue(n - 1)
-        for spin in (self.pulseSpin, self.sMinSpin, self.sMaxSpin):
+        for spin in (self.sMinSpin, self.sMaxSpin):
             spin.blockSignals(False)
         self.redraw()
 
@@ -387,7 +407,10 @@ class HeatmapTab(QWidget):
         data = self.session.processed
         self.stack.setCurrentWidget(self.cartesian if self.cartesianCheck.isChecked() else self.polar)
         self.angleAxisCheck.setEnabled(self.cartesianCheck.isChecked())
-        if data is None or data.sizes["pulse"] == 0:
+        self.navigator.setEnabled(not self.averageCheck.isChecked())
+        hasTransmission = self.session.transmissionCalib is not None and len(self.session.transmissionCalib) > 0
+        self.transmissionCheck.setEnabled(hasTransmission)
+        if data is None or data.sizes["pulse"] == 0 or self.navigator.position() is None:
             self.infoLabel.setText("Apply the preprocessing to see a heatmap")
             return
         lo, hi = sorted((self.sMinSpin.value(), self.sMaxSpin.value()))
@@ -397,17 +420,26 @@ class HeatmapTab(QWidget):
         detectors = [int(d) for d in window["detector"].values]
         angles = self._angles(detectors)
         keep = np.isfinite(angles)
+        notes = []
         if self.averageCheck.isChecked():
             traces = window.mean("pulse").values
-            self.pulseLabel.setText(f"mean of {data.sizes['pulse']} pulses")
-            peaks = []
+            notes.append(f"mean of {data.sizes['pulse']} pulses")
+            peaks, tid = [], None
         else:
-            i = min(self.pulseSpin.value(), data.sizes["pulse"] - 1)
+            i = min(self.navigator.position(), data.sizes["pulse"] - 1)
             tid, pid = data["pulse"].to_index()[i]
-            self.pulseLabel.setText(traceLabel(data, i))
             traces = window.isel(pulse=i).values
             peaks = self._peaks(tid, pid, detectors) if self.peaksCheck.isChecked() else []
         traces = np.nan_to_num(np.asarray(traces, dtype=float))
+        if hasTransmission and self.transmissionCheck.isChecked():
+            factors, electronEnergy = self.session.transmissionFactors(
+                detectors, self.session.photonEnergyOfTrain(tid))
+            unscaled = [d for d, f in zip(detectors, factors) if not np.isfinite(f)]
+            traces = traces * np.where(np.isfinite(factors), factors, 1.0)[:, None]
+            notes.append("scaled by transmission" + (f" (E_e = {electronEnergy:.1f} eV)"
+                                                     if electronEnergy is not None else ""))
+            if unscaled:
+                notes.append(f"no coefficient for ToF {unscaled}: unscaled")
         samples = window["sample"].values.astype(float)
         cmap = pg.colormap.get(self.cmapCombo.currentText())
         view = self.currentView()
@@ -427,8 +459,9 @@ class HeatmapTab(QWidget):
                               [(remap[r], p, a, b) for r, p, a, b in peaks if r in remap],
                               self.interpolateCheck.isChecked(), cmap, levels)
         missing = [d for d, ok in zip(detectors, keep) if not ok]
-        self.infoLabel.setText(f"{len(detectors)} detectors, samples {lo}–{hi}"
-                               + (f"<br>no angle for ToF {missing}: not shown" if missing else ""))
+        if missing:
+            notes.append(f"no angle for ToF {missing}: not shown")
+        self.infoLabel.setText("<br>".join([f"{len(detectors)} detectors, samples {lo}–{hi}"] + notes))
 
     def _peaks(self, tid, pid, detectors):
         results = self.session.results

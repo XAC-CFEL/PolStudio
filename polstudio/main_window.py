@@ -13,7 +13,7 @@ from .widgets.calibration_tab import CalibrationTab
 from .widgets.data_panel import DataPanel
 from .widgets.inspect_tab import InspectTab
 from .widgets.peaks_tab import PeaksTab
-from .widgets.heatmap_tab import HeatmapTab
+from .widgets.heatmap_tab import HeatmapTab, PanelHost
 from .widgets.polarization_tab import PolarizationTab
 from .widgets.preprocess_tab import PreprocessTab
 from .workers import Task
@@ -50,9 +50,12 @@ class MainWindow(QMainWindow):
         self.peaksTab = PeaksTab(session)
         self.calibrationTab = CalibrationTab(session)
         self.heatmapTab = HeatmapTab(session)
+        # One heatmap panel, shown on the Heatmap or the Polarization tab (whichever is open)
+        self.heatmapHost = PanelHost()
+        self.heatmapHost.adopt(self.heatmapTab)
         self.polarizationTab = PolarizationTab(session)
         for tab, name in ((self.inspectTab, "Inspect"), (self.preprocessTab, "Preprocess"),
-                          (self.peaksTab, "Peaks"), (self.heatmapTab, "Heatmap"),
+                          (self.peaksTab, "Peaks"), (self.heatmapHost, "Heatmap"),
                           (self.calibrationTab, "Calibration"), (self.polarizationTab, "Polarization")):
             self.tabs.addTab(tab, name)
         self.setCentralWidget(self.tabs)
@@ -102,6 +105,7 @@ class MainWindow(QMainWindow):
         self.dataPanel.updateRequested.connect(self.updateSelection)
         self.tabs.currentChanged.connect(lambda _: self.dataPanel.setUpdateTarget(self.tabs.tabText(self.tabs.currentIndex())))
         self.dataPanel.setUpdateTarget(self.tabs.tabText(self.tabs.currentIndex()))
+        self.tabs.currentChanged.connect(self._moveHeatmap)
         self.inspectTab.recutRequested.connect(self.recut)
         self.inspectTab.trainChanged.connect(self.preprocessTab.setStartTrain)
         self.preprocessTab.previewRequested.connect(self.preview)
@@ -113,6 +117,7 @@ class MainWindow(QMainWindow):
         self.calibrationTab.saveRequested.connect(self.saveCalibrationDialog)
         self.calibrationTab.photonEnergiesChanged.connect(self.onResultsChanged)
         self.polarizationTab.fitRequested.connect(self.fitPolarization)
+        self.polarizationTab.fitRunsRequested.connect(self.fitRuns)
         self.polarizationTab.chooseTableRequested.connect(self.chooseResultsTable)
         self.polarizationTab.appendRequested.connect(lambda: self.appendToResultsTable(auto=False))
 
@@ -186,7 +191,7 @@ class MainWindow(QMainWindow):
             return LEVEL_POLARIZATION
         if tab in (self.peaksTab, self.calibrationTab):
             return LEVEL_RESULTS
-        if tab in (self.preprocessTab, self.heatmapTab):
+        if tab in (self.preprocessTab, self.heatmapHost):
             return LEVEL_PROCESSED
         return LEVEL_LOADED
 
@@ -282,6 +287,7 @@ class MainWindow(QMainWindow):
         self.peaksTab.onResultsChanged()
         self.calibrationTab.onResultsChanged()
         self.heatmapTab.redraw()
+        self.polarizationTab.refreshOverviewStatus()
         self._refreshInfo()
 
     # ------------------------------------------------------------------ calibration / polarization
@@ -298,6 +304,8 @@ class MainWindow(QMainWindow):
     def onCalibrationChanged(self, warnings=None):
         self.calibrationTab.onCalibrationChanged(warnings)
         self.peaksTab.redraw()
+        self.heatmapTab.redraw()
+        self.polarizationTab.refreshOverviewStatus()
 
     def _calibrationDir(self):
         folder = RESULTS_DIR / "calibrations"
@@ -328,6 +336,18 @@ class MainWindow(QMainWindow):
         self.session.saveCalibration(path)
         print(f"Saved calibration to {path}")
         self.onCalibrationChanged()
+
+    def _moveHeatmap(self, _index):
+        if self.tabs.currentWidget() is self.polarizationTab:
+            self.polarizationTab.heatmapHost.adopt(self.heatmapTab)
+        elif self.tabs.currentWidget() is self.heatmapHost:
+            self.heatmapHost.adopt(self.heatmapTab)
+
+    def fitRuns(self, params):
+        if self.session.results is None or not len(self.session.results):
+            return self.error("Find peaks first (Peaks tab)")
+        self.runTask(lambda: self.session.fitPolarizationPerRun(params), self.polarizationTab.showRunOverview,
+                     "Fitting the polarization of every run")
 
     def fitPolarization(self, params):
         # Runs in the GUI thread: the fit is fast and draws into the embedded matplotlib figure

@@ -60,12 +60,13 @@ class DataPanel(QWidget):
         self.tree.setRootIsDecorated(True)
         self.tree.itemChanged.connect(self._itemChanged)
         layout.addWidget(self.tree, stretch=1)
+        layout.addLayout(self._allNoneButtons("runs", self._checkAllFiles))
 
         self.separateRunsCheck = QCheckBox("Process selected runs separately")
         self.separateRunsCheck.setToolTip(
             "On: every run goes through the preprocessing on its own, as if it were loaded alone – stacking and\n"
             "normalisation never mix runs and every run keeps its own traces and photon energy (e.g. for an energy\n"
-            "calibration). Step through the runs with the pulse index in the other tabs.\n"
+            "calibration). Step through the runs with the run index in the other tabs.\n"
             "Off: all selected runs are treated as one run.")
         self.separateRunsCheck.setChecked(bool(self.session.state.get("separateRuns")))
         self.separateRunsCheck.toggled.connect(lambda v: self.session.state.__setitem__("separateRuns", v))
@@ -84,7 +85,10 @@ class DataPanel(QWidget):
         layout.addWidget(trains)
 
         channels = QGroupBox("ADC channels (angle)")
-        self.channelGrid = QGridLayout(channels)
+        channelsLayout = QVBoxLayout(channels)
+        self.channelGrid = QGridLayout()
+        channelsLayout.addLayout(self.channelGrid)
+        channelsLayout.addLayout(self._allNoneButtons("channels", self._checkAllChannels))
         self.channelBoxes = {}
         layout.addWidget(channels)
         self._buildChannels(range(16))
@@ -119,6 +123,33 @@ class DataPanel(QWidget):
         layout.addWidget(self.infoLabel)
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _allNoneButtons(what, check):
+        row = QHBoxLayout()
+        for text, on in (("All", True), ("None", False)):
+            button = QPushButton(text)
+            button.setToolTip(f"{'Select' if on else 'Deselect'} all {what}")
+            button.clicked.connect(lambda _, on=on: check(on))
+            row.addWidget(button)
+        row.addStretch(1)
+        return row
+
+    def _checkAllFiles(self, on):
+        state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+        self.tree.blockSignals(True)
+        for i in range(self.tree.topLevelItemCount()):
+            run = self.tree.topLevelItem(i)
+            for j in range(run.childCount()):
+                item = run.child(j)
+                if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:   # files that could not be read stay unticked
+                    item.setCheckState(0, state)
+        self.tree.blockSignals(False)
+        self._itemChanged()
+
+    def _checkAllChannels(self, on):
+        for box in self.channelBoxes.values():
+            box.setChecked(on)
+
     def _angles(self):
         cfg = self.session.loaderConfig
         angles = list(cfg.get("angles", []))

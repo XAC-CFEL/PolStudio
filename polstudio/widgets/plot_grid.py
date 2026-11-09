@@ -48,6 +48,10 @@ class PlotGrid(QWidget):
         detectors = [int(d) for d in detectors]
         if list(self.plots) == detectors:
             return
+        # Unlink before removing: a linked ViewBox left pointing at a removed one crashes on the next paint
+        for plot in self.plots.values():
+            plot.setXLink(None)
+            plot.setYLink(None)
         self.view.clear()
         self.plots, self.axes = {}, {}
         first = None

@@ -70,7 +70,7 @@ def main(dataDir, outDir):
     shot(window, app, outDir, "1_inspect", window.inspectTab)
 
     window.inspectTab.periodSpin.setValue(1794.6)
-    window.inspectTab.trainSpin.setValue(5)
+    window.inspectTab.navigator.setPosition(5)
     shot(window, app, outDir, "1b_inspect_train5", window.inspectTab)
 
     stack = next(s for s in window.session.state["steps"] if s["name"] == "stack")
@@ -95,8 +95,12 @@ def main(dataDir, outDir):
     shot(window, app, outDir, "4_calibration", window.calibrationTab)
 
     window.fitPolarization(window.polarizationTab.params())
-    window.polarizationTab.drawHeatmap()
+    window.fitRuns(window.polarizationTab.params())
+    wait(window, app)
+    assert window.session.runPolarization is not None and len(window.session.runPolarization), "no per-run fits"
+    window.heatmapTab.transmissionCheck.setChecked(True)
     shot(window, app, outDir, "5_polarization", window.polarizationTab)
+    assert window.heatmapTab.parent() is window.polarizationTab.heatmapHost, "heatmap not shown on Polarization"
 
     sessionDir = outDir / "session"
     window._save(str(sessionDir))

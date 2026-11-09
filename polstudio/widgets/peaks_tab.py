@@ -3,9 +3,10 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
-                             QSpinBox, QSplitter, QVBoxLayout, QWidget)
+                             QSplitter, QVBoxLayout, QWidget)
 
-from ..session import DEFAULT_PEAK_PARAMS, PEAK_TOGGLES, traceLabel
+from ..session import DEFAULT_PEAK_PARAMS, PEAK_TOGGLES
+from .navigator import DetectorSelector, TraceNavigator, traceTable
 from .pandas_model import PandasModel, makeTableView
 from .params import ParamForm
 from .plot_grid import TOL, PlotGrid
@@ -58,11 +59,12 @@ class PeaksTab(QWidget):
 
         view = QGroupBox("View")
         viewLayout = QFormLayout(view)
-        self.pulseSpin = QSpinBox()
-        self.pulseSpin.valueChanged.connect(self.redraw)
-        viewLayout.addRow("pulse index", self.pulseSpin)
-        self.pulseLabel = QLabel("–")
-        viewLayout.addRow("trainId / pulseId", self.pulseLabel)
+        self.navigator = TraceNavigator()
+        self.navigator.changed.connect(self.redraw)
+        viewLayout.addRow(self.navigator)
+        self.detectorSelector = DetectorSelector()
+        self.detectorSelector.changed.connect(self.redraw)
+        viewLayout.addRow("detector", self.detectorSelector)
         self.axisCombo = QComboBox()
         self.axisCombo.addItems(["Sample", "Time (ns)", "Energy (eV)"])
         self.axisCombo.currentIndexChanged.connect(self._updateAxes)
@@ -111,9 +113,9 @@ class PeaksTab(QWidget):
 
     def onProcessedChanged(self):
         data = self.session.processed
-        n = data.sizes["pulse"] if data is not None else 0
-        self.pulseSpin.setMaximum(max(n - 1, 0))
         if data is not None:
+            self.navigator.setTraces(traceTable(data))
+            self.detectorSelector.setDetectors(data["detector"].values)
             dets = [int(d) for d in data["detector"].values]
             self.histDetector.blockSignals(True)
             self.histDetector.clear()
@@ -149,13 +151,12 @@ class PeaksTab(QWidget):
     def redraw(self):
         data = self.session.processed
         self.grid.clear()
-        if data is None or data.sizes["pulse"] == 0:
+        if data is None or data.sizes["pulse"] == 0 or self.navigator.position() is None:
             return
-        self.grid.setDetectors(data["detector"].values)
+        self.grid.setDetectors(self.detectorSelector.select(data["detector"].values))
         self._updateAxes()
-        i = min(self.pulseSpin.value(), data.sizes["pulse"] - 1)
+        i = min(self.navigator.position(), data.sizes["pulse"] - 1)
         tid, pid = data["pulse"].to_index()[i]
-        self.pulseLabel.setText(traceLabel(data, i))
         x = data["sample"].values
         results = self.session.results
         if results is not None and len(results):

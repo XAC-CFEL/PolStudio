@@ -1,13 +1,15 @@
 """Inspect raw train traces, tune the pulse split and baseline region and look at the per-pulse GMD energy.
 For .nxs files (no pulse split) a "train" is a run and its pulses are the scan points."""
 import numpy as np
+import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
-                             QSlider, QSpinBox, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSpinBox,
+                             QVBoxLayout, QWidget)
 
 from ToFPipeline import FlashH5Loader
 
+from .navigator import DetectorSelector, TraceNavigator
 from .plot_grid import CYCLE, TOL
 
 
@@ -29,18 +31,12 @@ class InspectTab(QWidget):
         nav = QGroupBox("Train")
         self.navBox = nav
         navLayout = QFormLayout(nav)
-        self.trainSlider = QSlider(Qt.Orientation.Horizontal)
-        self.trainSpin = QSpinBox()
-        self.trainSlider.valueChanged.connect(self.trainSpin.setValue)
-        self.trainSpin.valueChanged.connect(self.trainSlider.setValue)
-        self.trainSpin.valueChanged.connect(self._trainIndexChanged)
-        navLayout.addRow("index", self.trainSpin)
-        navLayout.addRow(self.trainSlider)
-        self.trainLabel = QLabel("–")
-        navLayout.addRow("trainId", self.trainLabel)
-        self.detectorCombo = QComboBox()
-        self.detectorCombo.currentIndexChanged.connect(self.redraw)
-        navLayout.addRow("detector", self.detectorCombo)
+        self.navigator = TraceNavigator(levels=("run", "trainId"), slider=True)
+        self.navigator.changed.connect(self._trainIndexChanged)
+        navLayout.addRow(self.navigator)
+        self.detectorSelector = DetectorSelector("sum of all")
+        self.detectorSelector.changed.connect(self.redraw)
+        navLayout.addRow("detector", self.detectorSelector)
         side.addWidget(nav)
 
         split = QGroupBox("Pulse split")
@@ -161,33 +157,21 @@ class InspectTab(QWidget):
 
     def onDataLoaded(self):
         self.updateFormat()
-        tids = self.session.trainIds()
-        self.trainSpin.setMaximum(max(len(tids) - 1, 0))
+        tt = self.session.loader.trainTraces
+        self.navigator.setTraces(pd.DataFrame({"run": tt["daq_run"].values, "trainId": tt["trainId"].values}))
         self._updateWindowMaximum()
-        self.trainSlider.setMaximum(max(len(tids) - 1, 0))
-        self.detectorCombo.blockSignals(True)
-        current = self.detectorCombo.currentData()
-        self.detectorCombo.clear()
-        self.detectorCombo.addItem("sum of all", None)
-        for det in self.session.loader.trainTraces["detector"].values:
-            self.detectorCombo.addItem(f"ToF {det}", int(det))
-        idx = self.detectorCombo.findData(current)
-        self.detectorCombo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.detectorCombo.blockSignals(False)
-        self._trainIndexChanged(self.trainSpin.value())
+        self.detectorSelector.setDetectors(tt["detector"].values)
+        self._trainIndexChanged()
 
     def currentTrainId(self):
-        tids = self.session.trainIds()
-        if not len(tids):
-            return None
-        return int(tids[min(self.trainSpin.value(), len(tids) - 1)])
+        current = self.navigator.current()
+        return None if current is None else int(current["trainId"])
 
-    def _trainIndexChanged(self, index):
+    def _trainIndexChanged(self):
         tid = self.currentTrainId()
         if tid is None:
             return
         split = self.session.splitsPulses
-        self.trainLabel.setText(f"{tid}  (run {self.session.runOfTrain(tid)})" if split else f"{tid}")
         self._trace = self.session.trainTrace(tid)
         self._pulses = None if split else self.session.pulsesOfTrain(tid)
         self.redraw()
@@ -270,7 +254,7 @@ class InspectTab(QWidget):
         self.gmdPlot.clear()
         if self._trace is None:
             return
-        det = self.detectorCombo.currentData()
+        det = self.detectorSelector.current()
         trace = self._trace
         x = trace["sample"].values
         if det is None:
