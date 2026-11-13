@@ -4,7 +4,7 @@ AngularHeatmapCanvas / CartesianHeightCanvas:
 
 - Polar: angle = detector angle (0° on +x, counter-clockwise), radius = sample. Either interpolated
   between detectors over the full circle, or one wedge per detector.
-- Cartesian: sample (x) vs detector number or detector angle (y), optionally interpolated between rows.
+- Cartesian: detector number or detector angle (x) vs sample (y), optionally interpolated between rows.
 
 Options as in PolScope: sample range, interpolate, show peaks (marker + width bar);
 plus colormap, a colour bar with draggable levels, the choice of run / train / pulse and scaling by the
@@ -228,58 +228,58 @@ class PolarHeatmap(_HeatmapBase):
 
 
 class CartesianHeatmap(_HeatmapBase):
-    """Sample on x, detector number (or detector angle) on y."""
+    """Detector number (or detector angle) on x, sample on y."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.plot.setTitle("Cartesian heatmap")
-        self.plot.setLabel("bottom", "sample")
+        self.plot.setLabel("left", "sample")
         self.image = pg.ImageItem()
         self.plot.addItem(self.image)
 
     def update(self, traces, samples, detIds, anglesDeg, peaks, useAngle, interpolate, cmap, levels):
         self._setColor(cmap, levels)
         self.image.setColorMap(cmap)
-        x0, width = float(samples[0]), float(max(samples[-1] - samples[0], 1))
-        axis = self.plot.getAxis("left")
+        y0, height = float(samples[0]), float(max(samples[-1] - samples[0], 1))
+        axis = self.plot.getAxis("bottom")
         if useAngle:
             anglesRad = np.deg2rad(np.asarray(anglesDeg, float)) % (2 * np.pi)
             grid = angularGrid(traces, anglesRad) if interpolate else nearestGrid(traces, anglesRad)
-            self.image.setImage(grid.T, autoLevels=False, levels=levels)
-            self.image.setRect(QRectF(x0, 0.0, width, 360.0))
-            self.plot.setLabel("left", "angle (°)")
+            self.image.setImage(grid, autoLevels=False, levels=levels)
+            self.image.setRect(QRectF(0.0, y0, 360.0, height))
+            self.plot.setLabel("bottom", "angle (°)")
             axis.setTicks(None)
-            self.plot.setYRange(0, 360, padding=0.02)
-            rowY = np.degrees(anglesRad)
+            self.plot.setXRange(0, 360, padding=0.02)
+            rowX = np.degrees(anglesRad)
         else:
             order = np.argsort(detIds)
             grid = traces[order]
             n = len(order)
             if interpolate and n > 1:
-                # linear interpolation between neighbouring detector rows (row centres at integer y)
+                # linear interpolation between neighbouring detector rows (row centres at integer x)
                 k = 16
-                y = np.clip((np.arange(n * k) + 0.5) / k - 0.5, 0, n - 1)
-                lo = np.minimum(y.astype(int), n - 2)
-                w = (y - lo)[:, None]
+                x = np.clip((np.arange(n * k) + 0.5) / k - 0.5, 0, n - 1)
+                lo = np.minimum(x.astype(int), n - 2)
+                w = (x - lo)[:, None]
                 grid = grid[lo] * (1 - w) + grid[lo + 1] * w
-            self.image.setImage(grid.T, autoLevels=False, levels=levels)
-            self.image.setRect(QRectF(x0, -0.5, width, n))
-            self.plot.setLabel("left", "detector")
+            self.image.setImage(grid, autoLevels=False, levels=levels)
+            self.image.setRect(QRectF(-0.5, y0, n, height))
+            self.plot.setLabel("bottom", "detector")
             axis.setTicks([[(i, str(detIds[j])) for i, j in enumerate(order)]])
-            self.plot.setYRange(-0.5, n - 0.5, padding=0.02)
-            rowY = np.empty(n)
-            rowY[order] = np.arange(n)
-        self.plot.setXRange(x0, x0 + width, padding=0.02)
+            self.plot.setXRange(-0.5, n - 0.5, padding=0.02)
+            rowX = np.empty(n)
+            rowX[order] = np.arange(n)
+        self.plot.setYRange(y0, y0 + height, padding=0.02)
         self._levelItems = [self.image]
 
         xs, ys, segX, segY = [], [], [], []
         for row, pos, wl, wr in peaks:
             if not (samples[0] <= pos <= samples[-1]):
                 continue
-            xs.append(pos)
-            ys.append(rowY[row])
-            segX += [pos + wl, pos + wr]
-            segY += [rowY[row], rowY[row]]
+            xs.append(rowX[row])
+            ys.append(pos)
+            segX += [rowX[row], rowX[row]]
+            segY += [pos + wl, pos + wr]
         self.setPeaks(xs, ys, segX, segY)
 
 
@@ -329,7 +329,7 @@ class HeatmapTab(QWidget):
         form = QFormLayout(settings)
         self.cartesianCheck = QCheckBox("Cartesian view")
         form.addRow(self.cartesianCheck)
-        self.angleAxisCheck = QCheckBox("angle on y axis (Cartesian)")
+        self.angleAxisCheck = QCheckBox("angle on x axis (Cartesian)")
         self.angleAxisCheck.setToolTip("Cartesian view: detector angle (0–360°) instead of detector number")
         form.addRow(self.angleAxisCheck)
         self.sMinSpin = QSpinBox(maximum=1_000_000)
